@@ -86,8 +86,6 @@ int StoredProcedureLevel = 0;
 
 /* functions needed during run phase */
 static void AcquireMetadataLocks(List *taskList);
-static ShardPlacementAccess * CreatePlacementAccess(ShardPlacement *placement,
-													ShardPlacementAccessType accessType);
 static int64 ExecuteSingleModifyTask(CitusScanState *scanState, Task *task, CmdType
 									 operation, bool alwaysThrowErrorOnFailure, bool
 									 expectResults);
@@ -931,7 +929,7 @@ BuildPlacementAccessList(uint32 groupId, List *relationShardList,
  * CreatePlacementAccess returns a new ShardPlacementAccess for the given placement
  * and access type.
  */
-static ShardPlacementAccess *
+ShardPlacementAccess *
 CreatePlacementAccess(ShardPlacement *placement, ShardPlacementAccessType accessType)
 {
 	ShardPlacementAccess *placementAccess = NULL;

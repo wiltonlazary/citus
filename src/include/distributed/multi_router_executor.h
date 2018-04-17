@@ -49,6 +49,8 @@ extern int64 ExecuteModifyTasksSequentiallyWithoutResults(List *taskList,
 														  CmdType operation);
 
 /* helper functions */
+extern ShardPlacementAccess * CreatePlacementAccess(ShardPlacement *placement,
+													ShardPlacementAccessType accessType);
 extern bool TaskListRequires2PC(List *taskList);
 extern List * BuildPlacementSelectList(uint32 groupId, List *relationShardList);
 extern List * BuildPlacementDDLList(uint32 groupId, List *relationShardList);
