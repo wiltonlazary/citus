@@ -319,8 +319,6 @@ CreateDistributedTable(Oid relationId, Var *distributionColumn, char distributio
 	Oid colocatedTableId = InvalidOid;
 	bool localTableEmpty = false;
 
-	Relation colocatedRelation = NULL;
-
 	replicationModel = AppropriateReplicationModel(distributionMethod, viaDeprecatedAPI);
 
 	/*
@@ -354,13 +352,6 @@ CreateDistributedTable(Oid relationId, Var *distributionColumn, char distributio
 	 */
 	if (viaDeprecatedAPI)
 	{
-		/*
-		 * We exit early but there is no need to close colocatedRelation. Because
-		 * if viaDeprecatedAPI is true, we never open colocatedRelation in the first
-		 * place.
-		 */
-		Assert(colocatedRelation == NULL);
-
 		return;
 	}
 
@@ -412,11 +403,6 @@ CreateDistributedTable(Oid relationId, Var *distributionColumn, char distributio
 		{
 			CopyLocalDataIntoShards(relationId);
 		}
-	}
-
-	if (colocatedRelation != NULL)
-	{
-		relation_close(colocatedRelation, NoLock);
 	}
 }
 
