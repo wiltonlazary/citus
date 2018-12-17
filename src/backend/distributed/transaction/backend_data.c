@@ -47,8 +47,6 @@ typedef struct BackendManagementShmemData
 	int trancheId;
 #if (PG_VERSION_NUM >= 100000)
 	NamedLWLockTranche namedLockTranche;
-#else
-	LWLockTranche lockTranche;
 #endif
 	LWLock lock;
 
@@ -520,8 +518,6 @@ BackendManagementShmemInit(void)
 		NamedLWLockTranche *namedLockTranche =
 			&backendManagementShmemData->namedLockTranche;
 
-#else
-		LWLockTranche *lockTranche = &backendManagementShmemData->lockTranche;
 #endif
 
 		/* start by zeroing out all the memory */
@@ -534,17 +530,6 @@ BackendManagementShmemInit(void)
 		LWLockRegisterTranche(namedLockTranche->trancheId, trancheName);
 		LWLockInitialize(&backendManagementShmemData->lock,
 						 namedLockTranche->trancheId);
-#else
-		backendManagementShmemData->trancheId = LWLockNewTrancheId();
-
-		/* we only need a single lock */
-		lockTranche->array_base = &backendManagementShmemData->lock;
-		lockTranche->array_stride = sizeof(LWLock);
-		lockTranche->name = trancheName;
-
-		LWLockRegisterTranche(backendManagementShmemData->trancheId, lockTranche);
-		LWLockInitialize(&backendManagementShmemData->lock,
-						 backendManagementShmemData->trancheId);
 #endif
 
 		/* start the distributed transaction ids from 1 */
