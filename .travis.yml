@@ -1,5 +1,5 @@
 sudo: required
-dist: trusty
+dist: xenial
 language: c
 python:
   - "3.6"
@@ -21,7 +21,7 @@ matrix:
     - env: PGVERSION=10
     - env: PGVERSION=11
 before_install:
-  - git clone -b v0.7.9 --depth 1 https://github.com/citusdata/tools.git
+  - git clone -b xenial_tweaks --depth 1 https://github.com/citusdata/tools.git
   - sudo make -C tools install
   - setup_apt
   - curl https://install.citusdata.com/community/deb.sh | sudo bash
