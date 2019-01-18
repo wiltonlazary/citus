@@ -1374,7 +1374,7 @@ HasRecurringTuples(Node *node, RecurringTuplesType *recurType)
 	return expression_tree_walker(node, HasRecurringTuples, recurType);
 }
 
-
+#include "nodes/print.h"
 /*
  * SubqueryPushdownMultiNodeTree creates logical plan for subquery pushdown logic.
  * Note that this logic will be changed in next iterations, so we decoupled it
@@ -1460,6 +1460,8 @@ SubqueryPushdownMultiNodeTree(Query *queryTree)
 	columnList = list_concat(targetColumnList, havingClauseColumnList);
 
 	FlattenJoinVars(columnList, queryTree);
+	//elog(INFO, "Flattened col list: %s", pretty_format_node_dump(nodeToString(columnList)));
+	elog(INFO, "Target list: %s", pretty_format_node_dump(nodeToString(queryTree->targetList)));
 
 	/* create a target entry for each unique column */
 	subqueryTargetEntryList = CreateSubqueryTargetEntryList(columnList);
@@ -1546,6 +1548,9 @@ SubqueryPushdownMultiNodeTree(Query *queryTree)
  * Only exception is that, if a join is given an alias name, we do not want to
  * flatten those var's. If we do, deparsing fails since it expects to see a join
  * alias, and cannot access the RTE in the join tree by their names.
+ *
+ * Also note that in case of full outer joins, a column could be flattened to a
+ * coalesce expression if the column appears in the USING clause.
  */
 static void
 FlattenJoinVars(List *columnList, Query *queryTree)
@@ -1573,7 +1578,7 @@ FlattenJoinVars(List *columnList, Query *queryTree)
 		columnRte = rt_fetch(column->varno, rteList);
 		if (columnRte->rtekind == RTE_JOIN && columnRte->alias == NULL)
 		{
-			Var *normalizedVar = NULL;
+			Node *normalizedNode = NULL;
 
 			if (root == NULL)
 			{
@@ -1583,13 +1588,25 @@ FlattenJoinVars(List *columnList, Query *queryTree)
 				root->hasJoinRTEs = true;
 			}
 
-			normalizedVar = (Var *) flatten_join_alias_vars(root, (Node *) column);
+			normalizedNode = flatten_join_alias_vars(root, (Node *) column);
 
 			/*
 			 * We need to copy values over existing one to make sure it is updated on
 			 * respective places.
 			 */
-			memcpy(column, normalizedVar, sizeof(Var));
+			if (IsA(normalizedNode, Var))
+			{
+				memcpy(column, normalizedNode, sizeof(Var));
+			}
+			else if (IsA(normalizedNode, CoalesceExpr))
+			{
+				column = repalloc(column, sizeof(CoalesceExpr));
+				memcpy(column, normalizedNode, sizeof(CoalesceExpr));
+			}
+			else
+			{
+				elog(ERROR, "unrecognized node type: %d", nodeTag(normalizedNode));
+			}
 		}
 	}
 }
@@ -1609,13 +1626,13 @@ CreateSubqueryTargetEntryList(List *columnList)
 
 	foreach(columnCell, columnList)
 	{
-		Var *column = (Var *) lfirst(columnCell);
+		Node *column = (Node *) lfirst(columnCell);
 		uniqueColumnList = list_append_unique(uniqueColumnList, copyObject(column));
 	}
 
 	foreach(columnCell, uniqueColumnList)
 	{
-		Var *column = (Var *) lfirst(columnCell);
+		Node *column = (Node *) lfirst(columnCell);
 		TargetEntry *newTargetEntry = makeNode(TargetEntry);
 		StringInfo columnNameString = makeStringInfo();
 
@@ -1633,6 +1650,8 @@ CreateSubqueryTargetEntryList(List *columnList)
 }
 
 
+static bool CompareColumns(Var **c1, Var *c2, AttrNumber resNo);
+
 /*
  * UpdateVarMappingsForExtendedOpNode updates varno/varattno fields of columns
  * in columnList to point to corresponding target in subquery target entry
@@ -1642,26 +1661,70 @@ static void
 UpdateVarMappingsForExtendedOpNode(List *columnList, List *subqueryTargetEntryList)
 {
 	ListCell *columnCell = NULL;
+
+	columnList = pull_var_clause_default((Node *) columnList);
+
 	foreach(columnCell, columnList)
 	{
+		Node *no = (Node *) lfirst(columnCell);
 		Var *columnOnTheExtendedNode = (Var *) lfirst(columnCell);
 		ListCell *targetEntryCell = NULL;
+
+		if (!IsA(no, Var))
+			elog(INFO, "Not Var: %s", pretty_format_node_dump(nodeToString(no)));
 		foreach(targetEntryCell, subqueryTargetEntryList)
 		{
 			TargetEntry *targetEntry = (TargetEntry *) lfirst(targetEntryCell);
+			AttrNumber resNo = targetEntry->resno;
 			Var *targetColumn = NULL;
+			bool found = false;
 
-			Assert(IsA(targetEntry->expr, Var));
-			targetColumn = (Var *) targetEntry->expr;
-			if (columnOnTheExtendedNode->varno == targetColumn->varno &&
-				columnOnTheExtendedNode->varattno == targetColumn->varattno)
+			if (IsA(targetEntry->expr, Var))
 			{
-				columnOnTheExtendedNode->varno = 1;
-				columnOnTheExtendedNode->varattno = targetEntry->resno;
-				break;
+				targetColumn = (Var *) targetEntry->expr;
+
+				//elog(INFO, "Befpore: %s", pretty_format_node_dump(nodeToString(columnOnTheExtendedNode)));
+				if (CompareColumns(&columnOnTheExtendedNode, targetColumn, resNo))
+					break;
+				//elog(INFO, "After: %s", pretty_format_node_dump(nodeToString(columnOnTheExtendedNode)));
+			}
+			else if (IsA(targetEntry->expr, CoalesceExpr))
+			{
+				CoalesceExpr *coalesceExpr = (CoalesceExpr *) targetEntry->expr;
+				ListCell *argCell = NULL;
+
+				foreach(argCell, coalesceExpr->args)
+				{
+					Node *e = (Node *) lfirst(argCell);
+
+					if (IsA(e, Var))
+					{
+						targetColumn = (Var *) e;
+						if (CompareColumns(&columnOnTheExtendedNode, targetColumn, resNo)) { found = true; break;}
+
+					}
+				}
+
+				if (found)
+					break;
 			}
 		}
 	}
+}
+
+
+static bool
+CompareColumns(Var **c1, Var *c2, AttrNumber resNo)
+{
+	if ((*c1)->varno == c2->varno &&
+		(*c1)->varattno == c2->varattno)
+	{
+		(*c1)->varno = 1;
+		(*c1)->varattno = resNo;
+
+		return true;
+	}
+	return false;
 }
 
 
