@@ -58,6 +58,7 @@ static bool ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column);
 bool
 FastPathRouterQuery(Query *query)
 {
+	return true;
 	RangeTblEntry *rangeTableEntry = NULL;
 	List *rangeTableList = NIL;
 	FromExpr *joinTree = query->jointree;
