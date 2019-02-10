@@ -68,5 +68,6 @@ extern void AddShardIntervalRestrictionToSelect(Query *subqery,
 extern bool UpdateOrDeleteQuery(Query *query);
 extern List * WorkersContainingAllShards(List *prunedShardIntervalsList);
 
+extern bool FastPathRouterQuery(Query *query);
 
 #endif /* MULTI_ROUTER_PLANNER_H */
