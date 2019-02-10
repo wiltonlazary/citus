@@ -129,6 +129,11 @@ FastPathRouterQuery(Query *query)
 		quals = (Node *) make_ands_explicit((List *) quals);
 	}
 
+	if (ContainsFalseClause(make_ands_implicit(quals)))
+	{
+		return false;
+	}
+
 	/*
 	 * Distribution column must be used in a simple equality match check and it must be
 	 * place at top level conjustion operator. In simple words, we should have

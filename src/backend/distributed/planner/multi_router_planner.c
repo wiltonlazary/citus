@@ -2084,6 +2084,32 @@ TargetShardIntervalsForQuery(Query *query,
 	bool multiplePartitionValuesExist = false;
 	Const *queryPartitionValueConst = NULL;
 
+	if (FastPathRouterQuery(query))
+	{
+		Oid relationId = ExtractFirstDistributedTableId(query);
+
+		/* convert list of expressions into expression tree */
+		Node *quals = query->jointree->quals;
+		Const *restrictionPartitionValueConst = NULL;
+
+		List *prunedShardIntervalList =
+			PruneShards(relationId, 1,
+						make_ands_implicit(quals), &queryPartitionValueConst);
+
+		if (list_length(prunedShardIntervalList) != 1)
+		{
+			elog(ERROR, "Buyuk hata");
+		}
+
+		/* set the outgoing partition column value if requested */
+		if (partitionValueConst != NULL)
+		{
+			*partitionValueConst = queryPartitionValueConst;
+		}
+
+		return list_make1(prunedShardIntervalList);
+	}
+
 	Assert(restrictionContext != NULL);
 
 	foreach(restrictionCell, restrictionContext->relationRestrictionList)
