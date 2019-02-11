@@ -51,7 +51,6 @@ static uint64 NextPlanId = 1;
 
 
 /* local function forward declarations */
-static PlannedStmt * GenerateDummySeqScanPlan(Query *parse);
 static bool NeedsDistributedPlanningWalker(Node *node, void *context);
 static PlannedStmt * CreateDistributedPlannedStmt(uint64 planId, PlannedStmt *localPlan,
 												  Query *originalQuery, Query *query,
@@ -156,7 +155,7 @@ distributed_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 
 		if (needsDistributedPlanning && !boundParams && FastPathRouterQuery(parse))
 		{
-			result = GenerateDummySeqScanPlan(parse);
+			result = GeneratePlaceHolderPlannedStmt(parse);
 		}
 		else
 		{
@@ -204,32 +203,6 @@ distributed_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	return result;
 }
 
-
-/*
- * TODO: write comments
- */
-static PlannedStmt *
-GenerateDummySeqScanPlan(Query *parse)
-{
-	PlannedStmt *result = makeNode(PlannedStmt);
-	SeqScan *node = makeNode(SeqScan);
-	Plan *plan = &node->plan;
-	Oid relationId = ExtractFirstDistributedTableId(parse);
-
-	plan->targetlist = copyObject(parse->targetList);
-	plan->qual = NULL;
-	plan->lefttree = NULL;
-	plan->righttree = NULL;
-	node->scanrelid = 1;
-
-	result->rtable = copyObject(parse->rtable);
-	result->commandType = CMD_SELECT;
-	result->planTree = (Plan *) plan;
-
-	result->relationOids = list_make1_oid(relationId);
-
-	return result;
-}
 
 
 /*

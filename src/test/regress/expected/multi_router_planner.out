@@ -1389,6 +1389,7 @@ SELECT *
 	WHERE author_id = 1 and 1=0;
 DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
+DETAIL:  distribution column value: 1
  id | author_id | title | word_count 
 ----+-----------+-------+------------
 (0 rows)
@@ -1417,6 +1418,7 @@ SELECT *
 	WHERE a.author_id = 10 and int4eq(1, 2);
 DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
+DETAIL:  distribution column value: 10
  id | author_id | title | word_count 
 ----+-----------+-------+------------
 (0 rows)
@@ -1625,6 +1627,7 @@ SELECT word_count, rank() OVER (PARTITION BY author_id ORDER BY word_count)
 	WHERE author_id = 1 and 1=0;
 DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
+DETAIL:  distribution column value: 1
  word_count | rank 
 ------------+------
 (0 rows)

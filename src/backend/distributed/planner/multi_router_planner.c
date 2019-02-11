@@ -2090,19 +2090,16 @@ TargetShardIntervalsForQuery(Query *query,
 
 		/* convert list of expressions into expression tree */
 		Node *quals = query->jointree->quals;
-		Const *restrictionPartitionValueConst = NULL;
 
 		List *prunedShardIntervalList =
-			PruneShards(relationId, 1,
-						make_ands_implicit(quals), &queryPartitionValueConst);
+			PruneShards(relationId, 1, make_ands_implicit((Expr *) quals),
+						&queryPartitionValueConst);
 
-		if (list_length(prunedShardIntervalList) != 1)
-		{
-			elog(ERROR, "Buyuk hata");
-		}
+		/* we're only expecting single shard from a single table */
+		Assert(list_length(prunedShardIntervalList) == 1);
 
 		/* set the outgoing partition column value if requested */
-		if (partitionValueConst != NULL)
+		if (queryPartitionValueConst != NULL)
 		{
 			*partitionValueConst = queryPartitionValueConst;
 		}

@@ -26,21 +26,68 @@
  * could use to decide the shard that a distributed query touches reside on
  * a worker node.
  *
- * Copyright (c) 2017, Citus Data, Inc.
+ * Copyright (c) 2019, Citus Data, Inc.
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "distributed/multi_physical_planner.h" /* only to use some utility functions */
 #include "distributed/metadata_cache.h"
-#include "distributed/pg_dist_partition.h"
 #include "distributed/multi_router_planner.h"
+#include "distributed/pg_dist_partition.h"
+#include "distributed/shard_pruning.h"
 #include "nodes/parsenodes.h"
 #include "nodes/pg_list.h"
 #include "optimizer/clauses.h"
 
 
 static bool ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column);
+
+
+/*
+ * GeneratePlaceHolderPlannedStmt creates a planned statement which contains
+ * a sequential scan on the relation that is accessed by the input query.
+ * The returned PlannedStmt is not proper (e.g., set_plan_references() is
+ * not called on the plan or the quals are not set), so should not be
+ * passed to the executor directly. This is only useful to have a
+ * placeholder PlannedStmt where target list is properly set. Note that
+ * this is what router executor relies on.
+ *
+ * Note that this function makes the assumption (and the assertion) that
+ * the input query is in the form defined by FastPathRouterQuery().
+ */
+PlannedStmt *
+GeneratePlaceHolderPlannedStmt(Query *parse)
+{
+	PlannedStmt *result = makeNode(PlannedStmt);
+	SeqScan *seqScanNode = makeNode(SeqScan);
+	Plan *plan = &seqScanNode->plan;
+	Oid relationId = InvalidOid;
+
+	AssertArg(FastPathRouterQuery(parse));
+
+	/* there is only a single relation rte */
+	seqScanNode->scanrelid = 1;
+
+	plan->targetlist = copyObject(parse->targetList);
+	plan->qual = NULL;
+	plan->lefttree = NULL;
+	plan->righttree = NULL;
+	plan->plan_node_id = 1;
+
+	/*  rtable is used for access permission checks */
+	result->commandType = CMD_SELECT;
+	result->queryId = parse->queryId;
+	result->stmt_len = parse->stmt_len;
+
+	result->rtable = copyObject(parse->rtable);
+	result->planTree = (Plan *) plan;
+
+	relationId = ExtractFirstDistributedTableId(parse);
+	result->relationOids = list_make1_oid(relationId);
+
+	return result;
+}
 
 
 /*
@@ -129,7 +176,8 @@ FastPathRouterQuery(Query *query)
 		quals = (Node *) make_ands_explicit((List *) quals);
 	}
 
-	if (ContainsFalseClause(make_ands_implicit(quals)))
+	/* WHERE false; queries are tricky, let the non-fast path handle that */
+	if (ContainsFalseClause(make_ands_implicit((Expr *) quals)))
 	{
 		return false;
 	}
