@@ -36,6 +36,7 @@
 #include "distributed/multi_router_planner.h"
 #include "distributed/pg_dist_partition.h"
 #include "distributed/shard_pruning.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "nodes/pg_list.h"
 #include "optimizer/clauses.h"
@@ -53,7 +54,7 @@ static bool ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column);
  * placeholder PlannedStmt where target list is properly set. Note that
  * this is what router executor relies on.
  *
- * Note that this function makes the assumption (and the assertion) that
+ * This function makes the assumption (and the assertion) that
  * the input query is in the form defined by FastPathRouterQuery().
  */
 PlannedStmt *

@@ -146,8 +146,8 @@ static List * get_all_actual_clauses(List *restrictinfo_list);
 static int CompareInsertValuesByShardId(const void *leftElement,
 										const void *rightElement);
 static uint64 GetInitialShardId(List *relationShardList);
-static List * TargetShardIntervalsForFastPathQuery(Query *query,
-												   Const **partitionValueConst);
+static List * TargetShardIntervalForFastPathQuery(Query *query,
+												  Const **partitionValueConst);
 static List * SingleShardSelectTaskList(Query *query, uint64 jobId,
 										List *relationShardList, List *placementList,
 										uint64 shardId);
@@ -1891,7 +1891,7 @@ PlanRouterQuery(Query *originalQuery,
 	if (FastPathRouterQuery(originalQuery))
 	{
 		List *shardIntervalList =
-			TargetShardIntervalsForFastPathQuery(originalQuery, partitionValueConst);
+			TargetShardIntervalForFastPathQuery(originalQuery, partitionValueConst);
 
 		prunedRelationShardList = list_make1(shardIntervalList);
 	}
@@ -2077,7 +2077,7 @@ GetInitialShardId(List *relationShardList)
 
 
 /*
- * TargetShardIntervalsForFastPathQuery gets a query which is in
+ * TargetShardIntervalForFastPathQuery gets a query which is in
  * the form defined by FastPathRouterQuery() and returns exactly
  * one shard interval (see FastPathRouterQuery() for the detail).
  *
@@ -2085,7 +2085,7 @@ GetInitialShardId(List *relationShardList)
  * partitionValueConst
  */
 static List *
-TargetShardIntervalsForFastPathQuery(Query *query, Const **partitionValueConst)
+TargetShardIntervalForFastPathQuery(Query *query, Const **partitionValueConst)
 {
 	Const *queryPartitionValueConst = NULL;
 

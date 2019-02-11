@@ -147,14 +147,21 @@ distributed_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	PG_TRY();
 	{
 		/*
-		 * TODO: update comment
+		 * For trivial queries, we're skipping the standard_planner() in
+		 * order to eliminate its overhead.
 		 *
-		 * First call into standard planner. This is required because the Citus
-		 * planner relies on parse tree transformations made by postgres' planner.
+		 * Otherwise, call into standard planner. This is required because the Citus
+		 * planner relies on both the restriction information per table and parse tree
+		 * transformations made by postgres' planner.
 		 */
 
-		if (needsDistributedPlanning && !boundParams && FastPathRouterQuery(parse))
+		if (needsDistributedPlanning && FastPathRouterQuery(parse))
 		{
+			/*
+			 * Note that boundParams on the distribution key would fail
+			 * on FastPathRouterQuery() since we're looking for a constant
+			 * with distribution key.
+			 */
 			result = GeneratePlaceHolderPlannedStmt(parse);
 		}
 		else
