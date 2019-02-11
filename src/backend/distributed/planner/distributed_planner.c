@@ -204,7 +204,6 @@ distributed_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 }
 
 
-
 /*
  * NeedsDistributedPlanning returns true if the Citus extension is loaded and
  * the query contains a distributed table.

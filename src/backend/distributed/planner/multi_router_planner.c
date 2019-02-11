@@ -146,6 +146,8 @@ static List * get_all_actual_clauses(List *restrictinfo_list);
 static int CompareInsertValuesByShardId(const void *leftElement,
 										const void *rightElement);
 static uint64 GetInitialShardId(List *relationShardList);
+static List * TargetShardIntervalsForFastPathQuery(Query *query,
+												   Const **partitionValueConst);
 static List * SingleShardSelectTaskList(Query *query, uint64 jobId,
 										List *relationShardList, List *placementList,
 										uint64 shardId);
@@ -1886,11 +1888,21 @@ PlanRouterQuery(Query *originalQuery,
 
 	*placementList = NIL;
 
-	prunedRelationShardList = TargetShardIntervalsForQuery(originalQuery,
-														   plannerRestrictionContext->
-														   relationRestrictionContext,
-														   &isMultiShardQuery,
-														   partitionValueConst);
+	if (FastPathRouterQuery(originalQuery))
+	{
+		List *shardIntervalList =
+			TargetShardIntervalsForFastPathQuery(originalQuery, partitionValueConst);
+
+		prunedRelationShardList = list_make1(shardIntervalList);
+	}
+	else
+	{
+		prunedRelationShardList =
+			TargetShardIntervalsForRestrictInfo(plannerRestrictionContext->
+												relationRestrictionContext,
+												&isMultiShardQuery,
+												partitionValueConst);
+	}
 
 	if (isMultiShardQuery)
 	{
@@ -2065,47 +2077,57 @@ GetInitialShardId(List *relationShardList)
 
 
 /*
- * TargetShardIntervalsForQuery performs shard pruning for all referenced relations
- * in the query and returns list of shards per relation. Shard pruning is done based
- * on provided restriction context per relation. The function sets multiShardQuery
- * to true if any of the relations pruned down to more than one active shard. It
- * also records pruned shard intervals in relation restriction context to be used
- * later on. Some queries may have contradiction clauses like 'and false' or
- * 'and 1=0', such queries are treated as if all of the shards of joining
- * relations are pruned out.
+ * TargetShardIntervalsForFastPathQuery gets a query which is in
+ * the form defined by FastPathRouterQuery() and returns exactly
+ * one shard interval (see FastPathRouterQuery() for the detail).
+ *
+ * Also set the outgoing partition column value if requested via
+ * partitionValueConst
+ */
+static List *
+TargetShardIntervalsForFastPathQuery(Query *query, Const **partitionValueConst)
+{
+	Const *queryPartitionValueConst = NULL;
+
+	Oid relationId = ExtractFirstDistributedTableId(query);
+	Node *quals = query->jointree->quals;
+
+	List *prunedShardIntervalList =
+		PruneShards(relationId, 1, make_ands_implicit((Expr *) quals),
+					&queryPartitionValueConst);
+
+	/* we're only expecting single shard from a single table */
+	Assert(FastPathRouterQuery(query));
+	Assert(list_length(prunedShardIntervalList) == 1);
+
+	/* set the outgoing partition column value if requested */
+	if (queryPartitionValueConst != NULL)
+	{
+		*partitionValueConst = queryPartitionValueConst;
+	}
+
+	return prunedShardIntervalList;
+}
+
+
+/*
+ * TargetShardIntervalsForRestrictInfo performs shard pruning for all referenced
+ * relations in the relation restriction context and returns list of shards per
+ * relation. Shard pruning is done based on provided restriction context per relation.
+ * The function sets multiShardQuery to true if any of the relations pruned down to
+ * more than one active shard. It also records pruned shard intervals in relation
+ * restriction context to be used later on. Some queries may have contradiction
+ * clauses like 'and false' or 'and 1=0', such queries are treated as if all of
+ * the shards of joining relations are pruned out.
  */
 List *
-TargetShardIntervalsForQuery(Query *query,
-							 RelationRestrictionContext *restrictionContext,
-							 bool *multiShardQuery, Const **partitionValueConst)
+TargetShardIntervalsForRestrictInfo(RelationRestrictionContext *restrictionContext,
+									bool *multiShardQuery, Const **partitionValueConst)
 {
 	List *prunedRelationShardList = NIL;
 	ListCell *restrictionCell = NULL;
 	bool multiplePartitionValuesExist = false;
 	Const *queryPartitionValueConst = NULL;
-
-	if (FastPathRouterQuery(query))
-	{
-		Oid relationId = ExtractFirstDistributedTableId(query);
-
-		/* convert list of expressions into expression tree */
-		Node *quals = query->jointree->quals;
-
-		List *prunedShardIntervalList =
-			PruneShards(relationId, 1, make_ands_implicit((Expr *) quals),
-						&queryPartitionValueConst);
-
-		/* we're only expecting single shard from a single table */
-		Assert(list_length(prunedShardIntervalList) == 1);
-
-		/* set the outgoing partition column value if requested */
-		if (queryPartitionValueConst != NULL)
-		{
-			*partitionValueConst = queryPartitionValueConst;
-		}
-
-		return list_make1(prunedShardIntervalList);
-	}
 
 	Assert(restrictionContext != NULL);
 
