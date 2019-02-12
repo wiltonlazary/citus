@@ -147,7 +147,8 @@ static int CompareInsertValuesByShardId(const void *leftElement,
 										const void *rightElement);
 static uint64 GetInitialShardId(List *relationShardList);
 static List * TargetShardIntervalForFastPathQuery(Query *query,
-												  Const **partitionValueConst);
+												  Const **partitionValueConst,
+												  bool *isMultiShardQuery);
 static List * SingleShardSelectTaskList(Query *query, uint64 jobId,
 										List *relationShardList, List *placementList,
 										uint64 shardId);
@@ -1891,7 +1892,8 @@ PlanRouterQuery(Query *originalQuery,
 	if (FastPathRouterQuery(originalQuery))
 	{
 		List *shardIntervalList =
-			TargetShardIntervalForFastPathQuery(originalQuery, partitionValueConst);
+			TargetShardIntervalForFastPathQuery(originalQuery, partitionValueConst,
+												&isMultiShardQuery);
 
 		prunedRelationShardList = list_make1(shardIntervalList);
 	}
@@ -2085,7 +2087,8 @@ GetInitialShardId(List *relationShardList)
  * partitionValueConst
  */
 static List *
-TargetShardIntervalForFastPathQuery(Query *query, Const **partitionValueConst)
+TargetShardIntervalForFastPathQuery(Query *query, Const **partitionValueConst,
+									bool *isMultiShardQuery)
 {
 	Const *queryPartitionValueConst = NULL;
 
@@ -2098,11 +2101,15 @@ TargetShardIntervalForFastPathQuery(Query *query, Const **partitionValueConst)
 
 	/* we're only expecting single shard from a single table */
 	Assert(FastPathRouterQuery(query));
-	Assert(list_length(prunedShardIntervalList) == 1);
 
-	/* set the outgoing partition column value if requested */
-	if (queryPartitionValueConst != NULL)
+	if (list_length(prunedShardIntervalList) > 1)
 	{
+		*isMultiShardQuery = true;
+	}
+	else if (list_length(prunedShardIntervalList) == 1 &&
+			 queryPartitionValueConst != NULL)
+	{
+		/* set the outgoing partition column value if requested */
 		*partitionValueConst = queryPartitionValueConst;
 	}
 

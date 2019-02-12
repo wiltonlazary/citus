@@ -43,6 +43,7 @@
 
 
 static bool ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column);
+static bool SimpleOpExpressionWithParam(Expr *clause);
 
 
 /*
@@ -244,9 +245,10 @@ ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column)
 	{
 		OpExpr *opExpr = (OpExpr *) node;
 		bool simpleExpression = SimpleOpExpression((Expr *) opExpr);
+		bool simpleOpExpressionWithParam = SimpleOpExpressionWithParam((Expr *) opExpr);
 		bool columnInExpr = false;
 
-		if (!simpleExpression)
+		if (!(simpleExpression || simpleOpExpressionWithParam))
 		{
 			return false;
 		}
@@ -282,4 +284,52 @@ ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column)
 	}
 
 	return false;
+}
+
+
+/*
+ * SimpleOpExpressionWithParam checks that given expression is a simple operator
+ * expression with param. A simple operator expression with param is a binary
+ * operator expression with operands of a var and an extern param.
+ */
+static bool
+SimpleOpExpressionWithParam(Expr *clause)
+{
+	Node *leftOperand = NULL;
+	Node *rightOperand = NULL;
+	Param *paramClause = NULL;
+
+	if (is_opclause(clause) && list_length(((OpExpr *) clause)->args) == 2)
+	{
+		leftOperand = get_leftop(clause);
+		rightOperand = get_rightop(clause);
+	}
+	else
+	{
+		return false; /* not a binary opclause */
+	}
+
+	/* strip coercions before doing check */
+	leftOperand = strip_implicit_coercions(leftOperand);
+	rightOperand = strip_implicit_coercions(rightOperand);
+
+	if (IsA(rightOperand, Param) && IsA(leftOperand, Var))
+	{
+		paramClause = (Param *) rightOperand;
+	}
+	else if (IsA(leftOperand, Param) && IsA(rightOperand, Var))
+	{
+		paramClause = (Param *) leftOperand;
+	}
+	else
+	{
+		return false;
+	}
+
+	if (paramClause->paramkind != PARAM_EXTERN)
+	{
+		return false;
+	}
+
+	return true;
 }

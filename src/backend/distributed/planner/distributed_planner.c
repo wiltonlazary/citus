@@ -155,14 +155,20 @@ distributed_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 		 * transformations made by postgres' planner.
 		 */
 
-		if (needsDistributedPlanning && FastPathRouterQuery(parse))
+		if (needsDistributedPlanning && FastPathRouterQuery(originalQuery))
 		{
 			/*
-			 * Note that boundParams on the distribution key would fail
-			 * on FastPathRouterQuery() since we're looking for a constant
-			 * with distribution key.
+			 * We resolve the parameters on the originalQuery which
+			 *
+			 * To support prepared statements for fast-path queries, we resolve the external
+			 * parameters at this point. Note that this is normally done by
+			 * eval_const_expr() in standard planner.
 			 */
-			result = GeneratePlaceHolderPlannedStmt(parse);
+			originalQuery =
+				(Query *) ResolveExternalParams((Node *) originalQuery,
+												copyParamList(boundParams));
+
+			result = GeneratePlaceHolderPlannedStmt(originalQuery);
 		}
 		else
 		{
