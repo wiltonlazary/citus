@@ -78,7 +78,7 @@ GeneratePlaceHolderPlannedStmt(Query *parse)
 	plan->plan_node_id = 1;
 
 	/*  rtable is used for access permission checks */
-	result->commandType = CMD_SELECT;
+	result->commandType = parse->commandType;
 	result->queryId = parse->queryId;
 	result->stmt_len = parse->stmt_len;
 
@@ -118,13 +118,19 @@ FastPathRouterQuery(Query *query)
 	ListCell *varClauseCell = NULL;
 	int partitionColumnReferenceCount = 0;
 
+	if (!(query->commandType == CMD_SELECT || query->commandType == CMD_UPDATE ||
+		query->commandType == CMD_DELETE))
+	{
+		return false;
+	}
+
 	/*
 	 * We want to deal with only very simple select queries. Some of the
 	 * checks might be too restrictive, still we prefer this way.
 	 */
-	if (query->commandType != CMD_SELECT || query->cteList != NIL ||
+	if (query->cteList != NIL || query->returningList != NIL ||
 		query->hasSubLinks || query->setOperations != NULL ||
-		query->hasForUpdate || query->hasTargetSRFs || query->hasRowSecurity)
+		query->hasForUpdate || query->hasTargetSRFs)
 	{
 		return false;
 	}
@@ -138,6 +144,11 @@ FastPathRouterQuery(Query *query)
 	if (list_length(rangeTableList) != 1)
 	{
 		return false;
+	}
+
+	if (contain_mutable_functions(query))
+	{
+		//return false;
 	}
 
 	/* make sure that the only range table in FROM clause */

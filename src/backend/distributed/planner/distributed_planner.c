@@ -87,7 +87,7 @@ static void PopPlannerRestrictionContext(void);
 static void ResetPlannerRestrictionContext(
 	PlannerRestrictionContext *plannerRestrictionContext);
 static bool HasUnresolvedExternParamsWalker(Node *expression, ParamListInfo boundParams);
-
+#include "optimizer/clauses.h"
 
 /* Distributed planner hook */
 PlannedStmt *
@@ -158,15 +158,21 @@ distributed_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 		if (needsDistributedPlanning && FastPathRouterQuery(originalQuery))
 		{
 			/*
-			 * We resolve the parameters on the originalQuery which
-			 *
-			 * To support prepared statements for fast-path queries, we resolve the external
-			 * parameters at this point. Note that this is normally done by
-			 * eval_const_expr() in standard planner.
+			 * To support prepared statements for fast-path queries, we resolve the
+			 * external parameters at this point. Note that this is normally done by
+			 * eval_const_expr() in standard planner when the boundParams are avaliable.
+			 * If not avaliable, as does for all other types of queries, Citus goes
+			 * through the logic of increasing the cost of the plan and forcing
+			 * PostgreSQL to pick custom plans.
 			 */
 			originalQuery =
 				(Query *) ResolveExternalParams((Node *) originalQuery,
 												copyParamList(boundParams));
+
+			if (UpdateOrDeleteQuery(originalQuery))
+			{
+				parse = (Query *) eval_const_expressions(NULL, (Node *) parse);
+			}
 
 			result = GeneratePlaceHolderPlannedStmt(originalQuery);
 		}

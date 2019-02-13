@@ -792,6 +792,9 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 			{
 				Assert(hasVarArgument || hasBadCoalesce);
 			}
+
+			//elog(INFO, "%s", nodeToString(targetEntry->expr));
+
 		}
 
 		if (joinTree != NULL)
@@ -808,6 +811,7 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 			{
 				Assert(hasVarArgument || hasBadCoalesce);
 			}
+
 		}
 
 		if (hasVarArgument)
@@ -1267,7 +1271,7 @@ static bool
 TargetEntryChangesValue(TargetEntry *targetEntry, Var *column, FromExpr *joinTree)
 {
 	bool isColumnValueChanged = true;
-	Expr *setExpr = targetEntry->expr;
+	Expr *setExpr = strip_implicit_coercions(targetEntry->expr);
 
 	if (targetEntry->resno != column->varattno)
 	{
@@ -1894,6 +1898,13 @@ PlanRouterQuery(Query *originalQuery,
 		List *shardIntervalList =
 			TargetShardIntervalForFastPathQuery(originalQuery, partitionValueConst,
 												&isMultiShardQuery);
+
+		if (UpdateOrDeleteQuery(originalQuery) && isMultiShardQuery)
+		{
+			planningError = DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
+										  "Cannot continue", NULL, NULL);
+			return planningError;
+		}
 
 		prunedRelationShardList = list_make1(shardIntervalList);
 	}
