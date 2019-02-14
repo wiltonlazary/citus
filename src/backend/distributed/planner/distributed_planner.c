@@ -169,11 +169,6 @@ distributed_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 				(Query *) ResolveExternalParams((Node *) originalQuery,
 												copyParamList(boundParams));
 
-			if (UpdateOrDeleteQuery(originalQuery))
-			{
-				parse = (Query *) eval_const_expressions(NULL, (Node *) parse);
-			}
-
 			result = GeneratePlaceHolderPlannedStmt(originalQuery);
 		}
 		else
