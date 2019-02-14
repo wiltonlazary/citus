@@ -146,11 +146,6 @@ FastPathRouterQuery(Query *query)
 		return false;
 	}
 
-	if (contain_mutable_functions(query))
-	{
-		//return false;
-	}
-
 	/* make sure that the only range table in FROM clause */
 	if (list_length(query->rtable) != 1)
 	{
