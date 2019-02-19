@@ -15,6 +15,7 @@
 
 #include "funcapi.h"
 #include "access/htup_details.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_type.h"
 #include "datatype/timestamp.h"
 #include "distributed/backend_data.h"
@@ -25,6 +26,7 @@
 #include "distributed/remote_commands.h"
 #include "distributed/transaction_identifier.h"
 #include "nodes/execnodes.h"
+#include "postmaster/autovacuum.h" /* to access autovacuum_max_workers */
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/lwlock.h"
@@ -44,11 +46,7 @@
 typedef struct BackendManagementShmemData
 {
 	int trancheId;
-#if (PG_VERSION_NUM >= 100000)
 	NamedLWLockTranche namedLockTranche;
-#else
-	LWLockTranche lockTranche;
-#endif
 	LWLock lock;
 
 	/*
@@ -93,6 +91,13 @@ PG_FUNCTION_INFO_V1(get_all_active_transactions);
 Datum
 assign_distributed_transaction_id(PG_FUNCTION_ARGS)
 {
+	Oid userId = GetUserId();
+
+	/* prepare data before acquiring spinlock to protect against errors */
+	int32 initiatorNodeIdentifier = PG_GETARG_INT32(0);
+	uint64 transactionNumber = PG_GETARG_INT64(1);
+	TimestampTz timestamp = PG_GETARG_TIMESTAMPTZ(2);
+
 	CheckCitusVersion(ERROR);
 
 	/* MyBackendData should always be avaliable, just out of paranoia */
@@ -119,10 +124,11 @@ assign_distributed_transaction_id(PG_FUNCTION_ARGS)
 	}
 
 	MyBackendData->databaseId = MyDatabaseId;
+	MyBackendData->userId = userId;
 
-	MyBackendData->transactionId.initiatorNodeIdentifier = PG_GETARG_INT32(0);
-	MyBackendData->transactionId.transactionNumber = PG_GETARG_INT64(1);
-	MyBackendData->transactionId.timestamp = PG_GETARG_TIMESTAMPTZ(2);
+	MyBackendData->transactionId.initiatorNodeIdentifier = initiatorNodeIdentifier;
+	MyBackendData->transactionId.transactionNumber = transactionNumber;
+	MyBackendData->transactionId.timestamp = timestamp;
 	MyBackendData->transactionId.transactionOriginator = false;
 
 	MyBackendData->citusBackend.initiatorNodeIdentifier =
@@ -381,9 +387,10 @@ static void
 StoreAllActiveTransactions(Tuplestorestate *tupleStore, TupleDesc tupleDescriptor)
 {
 	int backendIndex = 0;
-
 	Datum values[ACTIVE_TRANSACTION_COLUMN_COUNT];
 	bool isNulls[ACTIVE_TRANSACTION_COLUMN_COUNT];
+	bool showAllTransactions = superuser();
+	const Oid userId = GetUserId();
 
 	/*
 	 * We don't want to initialize memory while spinlock is held so we
@@ -392,6 +399,11 @@ StoreAllActiveTransactions(Tuplestorestate *tupleStore, TupleDesc tupleDescripto
 	 */
 	memset(values, 0, sizeof(values));
 	memset(isNulls, false, sizeof(isNulls));
+
+	if (is_member_of_role(userId, DEFAULT_ROLE_MONITOR))
+	{
+		showAllTransactions = true;
+	}
 
 	/* we're reading all distributed transactions, prevent new backends */
 	LockBackendSharedMemory(LW_SHARED);
@@ -402,6 +414,13 @@ StoreAllActiveTransactions(Tuplestorestate *tupleStore, TupleDesc tupleDescripto
 			&backendManagementShmemData->backends[backendIndex];
 		bool coordinatorOriginatedQuery = false;
 
+		/* to work on data after releasing g spinlock to protect against errors */
+		Oid databaseId = InvalidOid;
+		int backendPid = -1;
+		int initiatorNodeIdentifier = -1;
+		uint64 transactionNumber = 0;
+		TimestampTz transactionIdTimestamp = 0;
+
 		SpinLockAcquire(&currentBackend->mutex);
 
 		/* we're only interested in backends initiated by Citus */
@@ -411,9 +430,19 @@ StoreAllActiveTransactions(Tuplestorestate *tupleStore, TupleDesc tupleDescripto
 			continue;
 		}
 
-		values[0] = ObjectIdGetDatum(currentBackend->databaseId);
-		values[1] = Int32GetDatum(ProcGlobal->allProcs[backendIndex].pid);
-		values[2] = Int32GetDatum(currentBackend->citusBackend.initiatorNodeIdentifier);
+		/*
+		 * Unless the user has a role that allows seeing all transactions (superuser,
+		 * pg_monitor), skip over transactions belonging to other users.
+		 */
+		if (!showAllTransactions && currentBackend->userId != userId)
+		{
+			SpinLockRelease(&currentBackend->mutex);
+			continue;
+		}
+
+		databaseId = currentBackend->databaseId;
+		backendPid = ProcGlobal->allProcs[backendIndex].pid;
+		initiatorNodeIdentifier = currentBackend->citusBackend.initiatorNodeIdentifier;
 
 		/*
 		 * We prefer to use worker_query instead of transactionOriginator in the user facing
@@ -424,12 +453,18 @@ StoreAllActiveTransactions(Tuplestorestate *tupleStore, TupleDesc tupleDescripto
 		 * inside a distributed transaction.
 		 */
 		coordinatorOriginatedQuery = currentBackend->citusBackend.transactionOriginator;
-		values[3] = !coordinatorOriginatedQuery;
 
-		values[4] = UInt64GetDatum(currentBackend->transactionId.transactionNumber);
-		values[5] = TimestampTzGetDatum(currentBackend->transactionId.timestamp);
+		transactionNumber = currentBackend->transactionId.transactionNumber;
+		transactionIdTimestamp = currentBackend->transactionId.timestamp;
 
 		SpinLockRelease(&currentBackend->mutex);
+
+		values[0] = ObjectIdGetDatum(databaseId);
+		values[1] = Int32GetDatum(backendPid);
+		values[2] = Int32GetDatum(initiatorNodeIdentifier);
+		values[3] = !coordinatorOriginatedQuery;
+		values[4] = UInt64GetDatum(transactionNumber);
+		values[5] = TimestampTzGetDatum(transactionIdTimestamp);
 
 		tuplestore_putvalues(tupleStore, tupleDescriptor, values, isNulls);
 
@@ -512,38 +547,21 @@ BackendManagementShmemInit(void)
 	if (!alreadyInitialized)
 	{
 		int backendIndex = 0;
+		int totalProcs = 0;
 		char *trancheName = "Backend Management Tranche";
 
-#if (PG_VERSION_NUM >= 100000)
 		NamedLWLockTranche *namedLockTranche =
 			&backendManagementShmemData->namedLockTranche;
-
-#else
-		LWLockTranche *lockTranche = &backendManagementShmemData->lockTranche;
-#endif
 
 		/* start by zeroing out all the memory */
 		memset(backendManagementShmemData, 0,
 			   BackendManagementShmemSize());
 
-#if (PG_VERSION_NUM >= 100000)
 		namedLockTranche->trancheId = LWLockNewTrancheId();
 
 		LWLockRegisterTranche(namedLockTranche->trancheId, trancheName);
 		LWLockInitialize(&backendManagementShmemData->lock,
 						 namedLockTranche->trancheId);
-#else
-		backendManagementShmemData->trancheId = LWLockNewTrancheId();
-
-		/* we only need a single lock */
-		lockTranche->array_base = &backendManagementShmemData->lock;
-		lockTranche->array_stride = sizeof(LWLock);
-		lockTranche->name = trancheName;
-
-		LWLockRegisterTranche(backendManagementShmemData->trancheId, lockTranche);
-		LWLockInitialize(&backendManagementShmemData->lock,
-						 backendManagementShmemData->trancheId);
-#endif
 
 		/* start the distributed transaction ids from 1 */
 		pg_atomic_init_u64(&backendManagementShmemData->nextTransactionNumber, 1);
@@ -557,7 +575,8 @@ BackendManagementShmemInit(void)
 		 * We also initiate initiatorNodeIdentifier to -1, which can never be
 		 * used as a node id.
 		 */
-		for (backendIndex = 0; backendIndex < TotalProcs; ++backendIndex)
+		totalProcs = TotalProcCount();
+		for (backendIndex = 0; backendIndex < totalProcs; ++backendIndex)
 		{
 			backendManagementShmemData->backends[backendIndex].citusBackend.
 			initiatorNodeIdentifier = -1;
@@ -582,11 +601,59 @@ static size_t
 BackendManagementShmemSize(void)
 {
 	Size size = 0;
+	int totalProcs = TotalProcCount();
 
 	size = add_size(size, sizeof(BackendManagementShmemData));
-	size = add_size(size, mul_size(sizeof(BackendData), TotalProcs));
+	size = add_size(size, mul_size(sizeof(BackendData), totalProcs));
 
 	return size;
+}
+
+
+/*
+ * TotalProcCount returns the total processes that could run via the current
+ * postgres server. See the details in the function comments.
+ *
+ * There is one thing we should warn the readers. Citus enforces to be loaded
+ * as the first extension in shared_preload_libraries. However, if any other
+ * extension overrides MaxConnections, autovacuum_max_workers or
+ * max_worker_processes, our reasoning in this function may not work as expected.
+ * Given that it is not a usual pattern for extension, we consider Citus' behaviour
+ * good enough for now.
+ */
+int
+TotalProcCount(void)
+{
+	int maxBackends = 0;
+	int totalProcs = 0;
+
+#ifdef WIN32
+
+	/* autovacuum_max_workers is not PGDLLIMPORT, so use a high estimate for windows */
+	int estimatedMaxAutovacuumWorkers = 30;
+	maxBackends =
+		MaxConnections + estimatedMaxAutovacuumWorkers + 1 + max_worker_processes;
+#else
+
+	/*
+	 * We're simply imitating Postgrsql's InitializeMaxBackends(). Given that all
+	 * the items used here PGC_POSTMASTER, should be safe to access them
+	 * anytime during the execution even before InitializeMaxBackends() is called.
+	 */
+	maxBackends = MaxConnections + autovacuum_max_workers + 1 + max_worker_processes;
+#endif
+
+	/*
+	 * We prefer to maintain space for auxiliary procs or preperad transactions in
+	 * the backend space because they could be blocking processes and our current
+	 * implementation of distributed deadlock detection could process them
+	 * as a regular backend. In the future, we could consider chaning deadlock
+	 * detection algorithm to ignore auxiliary procs or preperad transactions and
+	 * save same space.
+	 */
+	totalProcs = maxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts;
+
+	return totalProcs;
 }
 
 
@@ -642,6 +709,7 @@ UnSetDistributedTransactionId(void)
 		SpinLockAcquire(&MyBackendData->mutex);
 
 		MyBackendData->databaseId = 0;
+		MyBackendData->userId = 0;
 		MyBackendData->transactionId.initiatorNodeIdentifier = 0;
 		MyBackendData->transactionId.transactionOriginator = false;
 		MyBackendData->transactionId.transactionNumber = 0;
@@ -730,10 +798,12 @@ AssignDistributedTransactionId(void)
 	uint64 nextTransactionNumber = pg_atomic_fetch_add_u64(transactionNumberSequence, 1);
 	int localGroupId = GetLocalGroupId();
 	TimestampTz currentTimestamp = GetCurrentTimestamp();
+	Oid userId = GetUserId();
 
 	SpinLockAcquire(&MyBackendData->mutex);
 
 	MyBackendData->databaseId = MyDatabaseId;
+	MyBackendData->userId = userId;
 
 	MyBackendData->transactionId.initiatorNodeIdentifier = localGroupId;
 	MyBackendData->transactionId.transactionOriginator = true;
@@ -754,9 +824,15 @@ AssignDistributedTransactionId(void)
 void
 MarkCitusInitiatedCoordinatorBackend(void)
 {
+	/*
+	 * GetLocalGroupId may throw exception which can cause leaving spin lock
+	 * unreleased. Calling GetLocalGroupId function before the lock to avoid this.
+	 */
+	int localGroupId = GetLocalGroupId();
+
 	SpinLockAcquire(&MyBackendData->mutex);
 
-	MyBackendData->citusBackend.initiatorNodeIdentifier = GetLocalGroupId();
+	MyBackendData->citusBackend.initiatorNodeIdentifier = localGroupId;
 	MyBackendData->citusBackend.transactionOriginator = true;
 
 	SpinLockRelease(&MyBackendData->mutex);

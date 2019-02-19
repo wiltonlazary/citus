@@ -44,7 +44,8 @@
 
 /* Defines used for fetching files and tables */
 /* the tablename in the overloaded COPY statement is the to-be-transferred file */
-#define TRANSMIT_REGULAR_COMMAND "COPY \"%s\" TO STDOUT WITH (format 'transmit')"
+#define TRANSMIT_WITH_USER_COMMAND \
+	"COPY \"%s\" TO STDOUT WITH (format 'transmit', user %s)"
 #define COPY_OUT_COMMAND "COPY %s TO STDOUT"
 #define COPY_SELECT_ALL_OUT_COMMAND "COPY (SELECT * FROM %s) TO STDOUT"
 #define COPY_IN_COMMAND "COPY %s FROM '%s'"
@@ -122,10 +123,13 @@ extern FmgrInfo * GetFunctionInfo(Oid typeId, Oid accessMethodId, int16 procedur
 extern uint64 ExtractShardIdFromTableName(const char *tableName, bool missingOk);
 extern List * TableDDLCommandList(const char *nodeName, uint32 nodePort,
 								  const char *tableName);
+extern int64 WorkerExecuteSqlTask(Query *query, char *taskFilename,
+								  bool binaryCopyFormat);
 
 
 /* Function declarations shared with the master planner */
 extern StringInfo TaskFilename(StringInfo directoryName, uint32 taskId);
+extern StringInfo UserTaskFilename(StringInfo directoryName, uint32 taskId);
 extern List * ExecuteRemoteQuery(const char *nodeName, uint32 nodePort, char *runAsUser,
 								 StringInfo queryString);
 extern List * ColumnDefinitionList(List *columnNameList, List *columnTypeList);

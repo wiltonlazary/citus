@@ -140,9 +140,8 @@ static FmgrInfo * TypeOutputFunctions(uint32 columnCount, Oid *typeIdArray,
 									  bool binaryFormat);
 static Datum CoerceColumnValue(Datum inputValue, CopyCoercionData *coercionPath);
 static void CreateLocalTable(RangeVar *relation, char *nodeName, int32 nodePort);
-static void CheckCopyPermissions(CopyStmt *copyStatement);
 static List * CopyGetAttnums(TupleDesc tupDesc, Relation rel, List *attnamelist);
-static bool IsCopyResultStmt(CopyStmt *copyStatement);
+static bool CopyStatementHasFormat(CopyStmt *copyStatement, char *formatName);
 static bool IsCopyFromWorker(CopyStmt *copyStatement);
 static NodeAddress * MasterNodeAddress(CopyStmt *copyStatement);
 static void CitusCopyFrom(CopyStmt *copyStatement, char *completionTag);
@@ -389,7 +388,7 @@ CopyToExistingShards(CopyStmt *copyStatement, char *completionTag)
 
 	/* set up the destination for the COPY */
 	copyDest = CreateCitusCopyDestReceiver(tableId, columnNameList, partitionColumnIndex,
-										   executorState, stopOnFailure);
+										   executorState, stopOnFailure, NULL);
 	dest = (DestReceiver *) copyDest;
 	dest->rStartup(dest, 0, tupleDescriptor);
 
@@ -425,7 +424,6 @@ CopyToExistingShards(CopyStmt *copyStatement, char *completionTag)
 	}
 
 	/* initialize copy state to read from COPY data source */
-#if (PG_VERSION_NUM >= 100000)
 	copyState = BeginCopyFrom(NULL,
 							  copiedDistributedRelation,
 							  copyStatement->filename,
@@ -433,13 +431,6 @@ CopyToExistingShards(CopyStmt *copyStatement, char *completionTag)
 							  NULL,
 							  copyStatement->attlist,
 							  copyStatement->options);
-#else
-	copyState = BeginCopyFrom(copiedDistributedRelation,
-							  copyStatement->filename,
-							  copyStatement->is_program,
-							  copyStatement->attlist,
-							  copyStatement->options);
-#endif
 
 	/* set up callback to identify error line number */
 	errorCallback.callback = CopyFromErrorCallback;
@@ -534,7 +525,6 @@ CopyToNewShards(CopyStmt *copyStatement, char *completionTag, Oid relationId)
 		(ShardConnections *) palloc0(sizeof(ShardConnections));
 
 	/* initialize copy state to read from COPY data source */
-#if (PG_VERSION_NUM >= 100000)
 	CopyState copyState = BeginCopyFrom(NULL,
 										distributedRelation,
 										copyStatement->filename,
@@ -542,13 +532,6 @@ CopyToNewShards(CopyStmt *copyStatement, char *completionTag, Oid relationId)
 										NULL,
 										copyStatement->attlist,
 										copyStatement->options);
-#else
-	CopyState copyState = BeginCopyFrom(distributedRelation,
-										copyStatement->filename,
-										copyStatement->is_program,
-										copyStatement->attlist,
-										copyStatement->options);
-#endif
 
 	CopyOutState copyOutState = (CopyOutState) palloc0(sizeof(CopyOutStateData));
 	copyOutState->delim = (char *) delimiterCharacter;
@@ -1150,7 +1133,11 @@ ConstructCopyStatement(CopyStmt *copyStatement, int64 shardId, bool useBinaryCop
 
 	appendStringInfo(command, "FROM STDIN WITH ");
 
-	if (useBinaryCopyFormat)
+	if (IsCopyResultStmt(copyStatement))
+	{
+		appendStringInfoString(command, "(FORMAT RESULT)");
+	}
+	else if (useBinaryCopyFormat)
 	{
 		appendStringInfoString(command, "(FORMAT BINARY)");
 	}
@@ -2049,10 +2036,16 @@ CopyFlushOutput(CopyOutState cstate, char *start, char *pointer)
  * The caller should provide the list of column names to use in the
  * remote COPY statement, and the partition column index in the tuple
  * descriptor (*not* the column name list).
+ *
+ * If intermediateResultIdPrefix is not NULL, the COPY will go into a set
+ * of intermediate results that are co-located with the actual table.
+ * The names of the intermediate results with be of the form:
+ * intermediateResultIdPrefix_<shardid>
  */
 CitusCopyDestReceiver *
 CreateCitusCopyDestReceiver(Oid tableId, List *columnNameList, int partitionColumnIndex,
-							EState *executorState, bool stopOnFailure)
+							EState *executorState, bool stopOnFailure,
+							char *intermediateResultIdPrefix)
 {
 	CitusCopyDestReceiver *copyDest = NULL;
 
@@ -2071,6 +2064,7 @@ CreateCitusCopyDestReceiver(Oid tableId, List *columnNameList, int partitionColu
 	copyDest->partitionColumnIndex = partitionColumnIndex;
 	copyDest->executorState = executorState;
 	copyDest->stopOnFailure = stopOnFailure;
+	copyDest->intermediateResultIdPrefix = intermediateResultIdPrefix;
 	copyDest->memoryContext = CurrentMemoryContext;
 
 	return copyDest;
@@ -2215,13 +2209,27 @@ CitusCopyDestReceiverStartup(DestReceiver *dest, int operation,
 
 	/* define the template for the COPY statement that is sent to workers */
 	copyStatement = makeNode(CopyStmt);
-	copyStatement->relation = makeRangeVar(schemaName, relationName, -1);
+
+	if (copyDest->intermediateResultIdPrefix != NULL)
+	{
+		DefElem *formatResultOption = NULL;
+		copyStatement->relation = makeRangeVar(NULL, copyDest->intermediateResultIdPrefix,
+											   -1);
+
+		formatResultOption = makeDefElem("format", (Node *) makeString("result"), -1);
+		copyStatement->options = list_make1(formatResultOption);
+	}
+	else
+	{
+		copyStatement->relation = makeRangeVar(schemaName, relationName, -1);
+		copyStatement->options = NIL;
+	}
+
 	copyStatement->query = NULL;
 	copyStatement->attlist = quotedColumnNameList;
 	copyStatement->is_from = true;
 	copyStatement->is_program = false;
 	copyStatement->filename = NULL;
-	copyStatement->options = NIL;
 	copyDest->copyStatement = copyStatement;
 
 	copyDest->shardConnectionHash = CreateShardConnectionHash(TopTransactionContext);
@@ -2443,11 +2451,22 @@ CitusCopyDestReceiverDestroy(DestReceiver *destReceiver)
  * COPY "resultkey" FROM STDIN WITH (format result) statement, which is used
  * to copy query results from the coordinator into workers.
  */
-static bool
+bool
 IsCopyResultStmt(CopyStmt *copyStatement)
 {
+	return CopyStatementHasFormat(copyStatement, "result");
+}
+
+
+/*
+ * CopyStatementHasFormat checks whether the COPY statement has the given
+ * format.
+ */
+static bool
+CopyStatementHasFormat(CopyStmt *copyStatement, char *formatName)
+{
 	ListCell *optionCell = NULL;
-	bool hasFormatReceive = false;
+	bool hasFormat = false;
 
 	/* extract WITH (...) options from the COPY statement */
 	foreach(optionCell, copyStatement->options)
@@ -2455,14 +2474,14 @@ IsCopyResultStmt(CopyStmt *copyStatement)
 		DefElem *defel = (DefElem *) lfirst(optionCell);
 
 		if (strncmp(defel->defname, "format", NAMEDATALEN) == 0 &&
-			strncmp(defGetString(defel), "result", NAMEDATALEN) == 0)
+			strncmp(defGetString(defel), formatName, NAMEDATALEN) == 0)
 		{
-			hasFormatReceive = true;
+			hasFormat = true;
 			break;
 		}
 	}
 
-	return hasFormatReceive;
+	return hasFormat;
 }
 
 
@@ -2471,18 +2490,10 @@ IsCopyResultStmt(CopyStmt *copyStatement)
  * COPYing from distributed tables and preventing unsupported actions. The
  * function returns a modified COPY statement to be executed, or NULL if no
  * further processing is needed.
- *
- * commandMustRunAsOwner is an output parameter used to communicate to the caller whether
- * the copy statement should be executed using elevated privileges. If
- * ProcessCopyStmt that is required, a call to CheckCopyPermissions will take
- * care of verifying the current user's permissions before ProcessCopyStmt
- * returns.
  */
 Node *
-ProcessCopyStmt(CopyStmt *copyStatement, char *completionTag, bool *commandMustRunAsOwner)
+ProcessCopyStmt(CopyStmt *copyStatement, char *completionTag, const char *queryString)
 {
-	*commandMustRunAsOwner = false; /* make sure variable is initialized */
-
 	/*
 	 * Handle special COPY "resultid" FROM STDIN WITH (format result) commands
 	 * for sending intermediate results to workers.
@@ -2591,43 +2602,48 @@ ProcessCopyStmt(CopyStmt *copyStatement, char *completionTag, bool *commandMustR
 
 	if (copyStatement->filename != NULL && !copyStatement->is_program)
 	{
-		const char *filename = copyStatement->filename;
+		char *filename = copyStatement->filename;
 
-		if (CacheDirectoryElement(filename))
+		/*
+		 * We execute COPY commands issued by the task-tracker executor here
+		 * because we're not normally allowed to write to a file as a regular
+		 * user and we don't want to execute the query as superuser.
+		 */
+		if (CacheDirectoryElement(filename) && copyStatement->query != NULL &&
+			!copyStatement->is_from && !is_absolute_path(filename))
 		{
-			/*
-			 * Only superusers are allowed to copy from a file, so we have to
-			 * become superuser to execute copies to/from files used by citus'
-			 * query execution.
-			 *
-			 * XXX: This is a decidedly suboptimal solution, as that means
-			 * that triggers, input functions, etc. run with elevated
-			 * privileges.  But this is better than not being able to run
-			 * queries as normal user.
-			 */
-			*commandMustRunAsOwner = true;
+			bool binaryCopyFormat = CopyStatementHasFormat(copyStatement, "binary");
+			int64 tuplesSent = 0;
+			Query *query = NULL;
+			Node *queryNode = copyStatement->query;
+			List *queryTreeList = NIL;
+			StringInfo userFilePath = makeStringInfo();
 
-			/*
-			 * Have to manually check permissions here as the COPY is will be
-			 * run as a superuser.
-			 */
-			if (copyStatement->relation != NULL)
+			RawStmt *rawStmt = makeNode(RawStmt);
+			rawStmt->stmt = queryNode;
+
+			queryTreeList = pg_analyze_and_rewrite(rawStmt, queryString, NULL, 0, NULL);
+
+			if (list_length(queryTreeList) != 1)
 			{
-				CheckCopyPermissions(copyStatement);
+				ereport(ERROR, (errmsg("can only execute a single query")));
 			}
 
+			query = (Query *) linitial(queryTreeList);
+
 			/*
-			 * Check if we have a "COPY (query) TO filename". If we do, copy
-			 * doesn't accept relative file paths. However, SQL tasks that get
-			 * assigned to worker nodes have relative paths. We therefore
-			 * convert relative paths to absolute ones here.
+			 * Add a user ID suffix to prevent other users from reading/writing
+			 * the same file. We do this consistently in all functions that interact
+			 * with task files.
 			 */
-			if (copyStatement->relation == NULL &&
-				!copyStatement->is_from &&
-				!is_absolute_path(filename))
-			{
-				copyStatement->filename = make_absolute_path(filename);
-			}
+			appendStringInfo(userFilePath, "%s.%u", filename, GetUserId());
+
+			tuplesSent = WorkerExecuteSqlTask(query, filename, binaryCopyFormat);
+
+			snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
+					 "COPY " UINT64_FORMAT, tuplesSent);
+
+			return NULL;
 		}
 	}
 
@@ -2724,7 +2740,7 @@ CreateLocalTable(RangeVar *relation, char *nodeName, int32 nodePort)
  *
  * Copied from postgres, where it's part of DoCopy().
  */
-static void
+void
 CheckCopyPermissions(CopyStmt *copyStatement)
 {
 	/* *INDENT-OFF* */

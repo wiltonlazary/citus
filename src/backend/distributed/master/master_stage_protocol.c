@@ -24,9 +24,7 @@
 #include "commands/tablecmds.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
-#if (PG_VERSION_NUM >= 100000)
 #include "catalog/partition.h"
-#endif
 #include "distributed/citus_ruleutils.h"
 #include "distributed/colocation_utils.h"
 #include "distributed/commands.h"
@@ -487,7 +485,7 @@ CreateShardsOnWorkers(Oid distributedRelationId, List *shardPlacements,
 					  bool useExclusiveConnection, bool colocatedShard)
 {
 	DistTableCacheEntry *cacheEntry = DistributedTableCacheEntry(distributedRelationId);
-	char *placementOwner = TableOwner(distributedRelationId);
+
 	bool includeSequenceDefaults = false;
 	List *ddlCommandList = GetTableDDLEvents(distributedRelationId,
 											 includeSequenceDefaults);
@@ -562,12 +560,12 @@ CreateShardsOnWorkers(Oid distributedRelationId, List *shardPlacements,
 														relationShardList);
 
 			connection = GetPlacementListConnection(connectionFlags, placementAccessList,
-													placementOwner);
+													NULL);
 		}
 		else
 		{
 			connection = GetPlacementConnection(connectionFlags, shardPlacement,
-												placementOwner);
+												NULL);
 		}
 
 		if (useExclusiveConnection)

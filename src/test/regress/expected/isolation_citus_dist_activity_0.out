@@ -1,6 +1,6 @@
 Parsed test spec with 3 sessions
 
-starting permutation: s1-begin s2-begin s3-begin s1-alter-table s2-view-dist s3-view-worker s2-rollback s1-commit s3-rollback
+starting permutation: s1-begin s2-begin s3-begin s1-alter-table s2-sleep s2-view-dist s3-view-worker s2-rollback s1-commit s3-rollback
 create_distributed_table
 
                
@@ -16,6 +16,12 @@ step s3-begin:
 step s1-alter-table: 
     ALTER TABLE test_table ADD COLUMN x INT;
 
+step s2-sleep: 
+	SELECT pg_sleep(0.2);
+
+pg_sleep       
+
+               
 step s2-view-dist: 
 	SELECT query, query_hostname, query_hostport, master_query_host_name, master_query_host_port, state, wait_event_type, wait_event, usename, datname FROM citus_dist_stat_activity ORDER BY query DESC;
 	
@@ -30,16 +36,16 @@ step s3-view-worker:
 
 query          query_hostname query_hostport master_query_host_namemaster_query_host_portstate          wait_event_typewait_event     usename        datname        
 
-SELECT worker_apply_shard_ddl_command (105297, 'public', '
+SELECT worker_apply_shard_ddl_command (105425, 'public', '
     ALTER TABLE test_table ADD COLUMN x INT;
 ')localhost      57638          coordinator_host57636          idle in transaction                              postgres       regression     
-SELECT worker_apply_shard_ddl_command (105296, 'public', '
+SELECT worker_apply_shard_ddl_command (105424, 'public', '
     ALTER TABLE test_table ADD COLUMN x INT;
 ')localhost      57637          coordinator_host57636          idle in transaction                              postgres       regression     
-SELECT worker_apply_shard_ddl_command (105295, 'public', '
+SELECT worker_apply_shard_ddl_command (105423, 'public', '
     ALTER TABLE test_table ADD COLUMN x INT;
 ')localhost      57638          coordinator_host57636          idle in transaction                              postgres       regression     
-SELECT worker_apply_shard_ddl_command (105294, 'public', '
+SELECT worker_apply_shard_ddl_command (105422, 'public', '
     ALTER TABLE test_table ADD COLUMN x INT;
 ')localhost      57637          coordinator_host57636          idle in transaction                              postgres       regression     
 SELECT gid FROM pg_prepared_xacts WHERE gid LIKE 'citus\_0\_%'localhost      57638                         0              idle                                         postgres       regression     
@@ -54,7 +60,7 @@ step s3-rollback:
 	ROLLBACK;
 
 
-starting permutation: s1-begin s2-begin s3-begin s1-insert s2-view-dist s3-view-worker s2-rollback s1-commit s3-rollback
+starting permutation: s1-begin s2-begin s3-begin s1-insert s2-sleep s2-view-dist s3-view-worker s2-rollback s1-commit s3-rollback
 create_distributed_table
 
                
@@ -70,6 +76,12 @@ step s3-begin:
 step s1-insert: 
  	INSERT INTO test_table VALUES (100, 100);
 
+step s2-sleep: 
+	SELECT pg_sleep(0.2);
+
+pg_sleep       
+
+               
 step s2-view-dist: 
 	SELECT query, query_hostname, query_hostport, master_query_host_name, master_query_host_port, state, wait_event_type, wait_event, usename, datname FROM citus_dist_stat_activity ORDER BY query DESC;
 	
@@ -86,7 +98,7 @@ query          query_hostname query_hostport master_query_host_namemaster_query_
 
 SELECT gid FROM pg_prepared_xacts WHERE gid LIKE 'citus\_0\_%'localhost      57638                         0              idle                                         postgres       regression     
 SELECT gid FROM pg_prepared_xacts WHERE gid LIKE 'citus\_0\_%'localhost      57637                         0              idle                                         postgres       regression     
-INSERT INTO public.test_table_105300 (column1, column2) VALUES (100, 100)localhost      57637          coordinator_host57636          idle in transaction                              postgres       regression     
+INSERT INTO public.test_table_105428 (column1, column2) VALUES (100, 100)localhost      57637          coordinator_host57636          idle in transaction                              postgres       regression     
 step s2-rollback: 
 	ROLLBACK;
 
@@ -97,7 +109,7 @@ step s3-rollback:
 	ROLLBACK;
 
 
-starting permutation: s1-begin s2-begin s3-begin s1-select s2-view-dist s3-view-worker s2-rollback s1-commit s3-rollback
+starting permutation: s1-begin s2-begin s3-begin s1-select s2-sleep s2-view-dist s3-view-worker s2-rollback s1-commit s3-rollback
 create_distributed_table
 
                
@@ -116,6 +128,12 @@ step s1-select:
 count          
 
 0              
+step s2-sleep: 
+	SELECT pg_sleep(0.2);
+
+pg_sleep       
+
+               
 step s2-view-dist: 
 	SELECT query, query_hostname, query_hostport, master_query_host_name, master_query_host_port, state, wait_event_type, wait_event, usename, datname FROM citus_dist_stat_activity ORDER BY query DESC;
 	
@@ -132,10 +150,10 @@ query          query_hostname query_hostport master_query_host_namemaster_query_
 
 SELECT gid FROM pg_prepared_xacts WHERE gid LIKE 'citus\_0\_%'localhost      57638                         0              idle                                         postgres       regression     
 SELECT gid FROM pg_prepared_xacts WHERE gid LIKE 'citus\_0\_%'localhost      57637                         0              idle                                         postgres       regression     
-COPY (SELECT count(*) AS count FROM test_table_105305 test_table WHERE true) TO STDOUTlocalhost      57638          coordinator_host57636          idle in transaction                              postgres       regression     
-COPY (SELECT count(*) AS count FROM test_table_105304 test_table WHERE true) TO STDOUTlocalhost      57637          coordinator_host57636          idle in transaction                              postgres       regression     
-COPY (SELECT count(*) AS count FROM test_table_105303 test_table WHERE true) TO STDOUTlocalhost      57638          coordinator_host57636          idle in transaction                              postgres       regression     
-COPY (SELECT count(*) AS count FROM test_table_105302 test_table WHERE true) TO STDOUTlocalhost      57637          coordinator_host57636          idle in transaction                              postgres       regression     
+COPY (SELECT count(*) AS count FROM test_table_105433 test_table WHERE true) TO STDOUTlocalhost      57638          coordinator_host57636          idle in transaction                              postgres       regression     
+COPY (SELECT count(*) AS count FROM test_table_105432 test_table WHERE true) TO STDOUTlocalhost      57637          coordinator_host57636          idle in transaction                              postgres       regression     
+COPY (SELECT count(*) AS count FROM test_table_105431 test_table WHERE true) TO STDOUTlocalhost      57638          coordinator_host57636          idle in transaction                              postgres       regression     
+COPY (SELECT count(*) AS count FROM test_table_105430 test_table WHERE true) TO STDOUTlocalhost      57637          coordinator_host57636          idle in transaction                              postgres       regression     
 step s2-rollback: 
 	ROLLBACK;
 
@@ -146,7 +164,7 @@ step s3-rollback:
 	ROLLBACK;
 
 
-starting permutation: s1-begin s2-begin s3-begin s1-select-router s2-view-dist s3-view-worker s2-rollback s1-commit s3-rollback
+starting permutation: s1-begin s2-begin s3-begin s1-select-router s2-sleep s2-view-dist s3-view-worker s2-rollback s1-commit s3-rollback
 create_distributed_table
 
                
@@ -165,6 +183,12 @@ step s1-select-router:
 count          
 
 0              
+step s2-sleep: 
+	SELECT pg_sleep(0.2);
+
+pg_sleep       
+
+               
 step s2-view-dist: 
 	SELECT query, query_hostname, query_hostport, master_query_host_name, master_query_host_port, state, wait_event_type, wait_event, usename, datname FROM citus_dist_stat_activity ORDER BY query DESC;
 	
@@ -181,7 +205,7 @@ query          query_hostname query_hostport master_query_host_namemaster_query_
 
 SELECT gid FROM pg_prepared_xacts WHERE gid LIKE 'citus\_0\_%'localhost      57638                         0              idle                                         postgres       regression     
 SELECT gid FROM pg_prepared_xacts WHERE gid LIKE 'citus\_0\_%'localhost      57637                         0              idle                                         postgres       regression     
-SELECT count(*) AS count FROM public.test_table_105307 test_table WHERE (column1 OPERATOR(pg_catalog.=) 55)localhost      57638                         0              idle                                         postgres       regression     
+SELECT count(*) AS count FROM public.test_table_105435 test_table WHERE (column1 OPERATOR(pg_catalog.=) 55)localhost      57638                         0              idle                                         postgres       regression     
 COMMIT         localhost      57637                         0              idle                                         postgres       regression     
 step s2-rollback: 
 	ROLLBACK;

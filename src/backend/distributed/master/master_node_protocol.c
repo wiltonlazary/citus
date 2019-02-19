@@ -61,9 +61,7 @@
 #include "utils/relcache.h"
 #include "utils/ruleutils.h"
 #include "utils/tqual.h"
-#if (PG_VERSION_NUM >= 100000)
 #include "utils/varlena.h"
-#endif
 
 
 /* Shard related configuration */
@@ -622,6 +620,7 @@ GetTableCreationCommands(Oid relationId, bool includeSequenceDefaults)
 	char *tableSchemaDef = NULL;
 	char *tableColumnOptionsDef = NULL;
 	char *createSchemaCommand = NULL;
+	char *tableOwnerDef = NULL;
 	Oid schemaId = InvalidOid;
 
 	/*
@@ -664,6 +663,12 @@ GetTableCreationCommands(Oid relationId, bool includeSequenceDefaults)
 	if (tableColumnOptionsDef != NULL)
 	{
 		tableDDLEventList = lappend(tableDDLEventList, tableColumnOptionsDef);
+	}
+
+	tableOwnerDef = TableOwnerResetCommand(relationId);
+	if (tableOwnerDef != NULL)
+	{
+		tableDDLEventList = lappend(tableDDLEventList, tableOwnerDef);
 	}
 
 	/* revert back to original search_path */

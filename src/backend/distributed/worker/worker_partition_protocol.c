@@ -16,6 +16,7 @@
 
 #include "postgres.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "pgstat.h"
 
 #include <arpa/inet.h>
@@ -79,7 +80,7 @@ static void OutputBinaryHeaders(FileOutputStream *partitionFileArray, uint32 fil
 static void OutputBinaryFooters(FileOutputStream *partitionFileArray, uint32 fileCount);
 static uint32 RangePartitionId(Datum partitionValue, const void *context);
 static uint32 HashPartitionId(Datum partitionValue, const void *context);
-static uint32 HashPartitionIdViaDeprecatedAPI(Datum partitionValue, const void *context);
+static StringInfo UserPartitionFilename(StringInfo directoryName, uint32 partitionId);
 static bool FileIsLink(char *filename, struct stat filestat);
 
 
@@ -185,71 +186,32 @@ worker_hash_partition_table(PG_FUNCTION_ARGS)
 	text *filterQueryText = PG_GETARG_TEXT_P(2);
 	text *partitionColumnText = PG_GETARG_TEXT_P(3);
 	Oid partitionColumnType = PG_GETARG_OID(4);
-	ArrayType *hashRangeObject = NULL;
+	ArrayType *hashRangeObject = PG_GETARG_ARRAYTYPE_P(5);
 
 	const char *filterQuery = text_to_cstring(filterQueryText);
 	const char *partitionColumn = text_to_cstring(partitionColumnText);
 
 	HashPartitionContext *partitionContext = NULL;
 	FmgrInfo *hashFunction = NULL;
-	Datum *hashRangeArray = NULL;
-	int32 partitionCount = 0;
+	Datum *hashRangeArray = DeconstructArrayObject(hashRangeObject);
+	int32 partitionCount = ArrayObjectCount(hashRangeObject);
 	StringInfo taskDirectory = NULL;
 	StringInfo taskAttemptDirectory = NULL;
 	FileOutputStream *partitionFileArray = NULL;
 	uint32 fileCount = 0;
 
-	uint32 (*HashPartitionIdFunction)(Datum, const void *);
-
-	Oid partitionBucketOid = InvalidOid;
+	uint32 (*hashPartitionIdFunction)(Datum, const void *);
 
 	CheckCitusVersion(ERROR);
 
 	partitionContext = palloc0(sizeof(HashPartitionContext));
+	partitionContext->syntheticShardIntervalArray =
+		SyntheticShardIntervalArrayForShardMinValues(hashRangeArray, partitionCount);
+	partitionContext->hasUniformHashDistribution =
+		HasUniformHashDistribution(partitionContext->syntheticShardIntervalArray,
+								   partitionCount);
 
-	/*
-	 * We do this hack for backward compatibility.
-	 *
-	 * In the older versions of Citus, worker_hash_partition_table()'s 6th parameter
-	 * was an integer which denoted the number of buckets to split the shard's data.
-	 * In the later versions of Citus, the sixth parameter is changed to get an array
-	 * of shard ranges, which is used as the ranges to split the shard's data.
-	 *
-	 * Keeping this value is important if the coordinator's Citus version is <= 7.3
-	 * and worker Citus version is > 7.3.
-	 */
-	partitionBucketOid = get_fn_expr_argtype(fcinfo->flinfo, 5);
-	if (partitionBucketOid == INT4ARRAYOID)
-	{
-		hashRangeObject = PG_GETARG_ARRAYTYPE_P(5);
-
-		hashRangeArray = DeconstructArrayObject(hashRangeObject);
-		partitionCount = ArrayObjectCount(hashRangeObject);
-
-		partitionContext->syntheticShardIntervalArray =
-			SyntheticShardIntervalArrayForShardMinValues(hashRangeArray, partitionCount);
-		partitionContext->hasUniformHashDistribution =
-			HasUniformHashDistribution(partitionContext->syntheticShardIntervalArray,
-									   partitionCount);
-
-		HashPartitionIdFunction = &HashPartitionId;
-	}
-	else if (partitionBucketOid == INT4OID)
-	{
-		partitionCount = PG_GETARG_UINT32(5);
-
-		partitionContext->syntheticShardIntervalArray =
-			GenerateSyntheticShardIntervalArray(partitionCount);
-		partitionContext->hasUniformHashDistribution = true;
-
-		HashPartitionIdFunction = &HashPartitionIdViaDeprecatedAPI;
-	}
-	else
-	{
-		/* we should never get other type of parameters */
-		ereport(ERROR, (errmsg("unexpected parameter for "
-							   "worker_hash_partition_table()")));
-	}
+	hashPartitionIdFunction = &HashPartitionId;
 
 	/* use column's type information to get the hashing function */
 	hashFunction = GetFunctionInfo(partitionColumnType, HASH_AM_OID, HASHSTANDARD_PROC);
@@ -276,7 +238,7 @@ worker_hash_partition_table(PG_FUNCTION_ARGS)
 
 	/* call the partitioning function that does the actual work */
 	FilterAndPartitionTable(filterQuery, partitionColumn, partitionColumnType,
-							HashPartitionIdFunction, (const void *) partitionContext,
+							hashPartitionIdFunction, (const void *) partitionContext,
 							partitionFileArray, fileCount);
 
 	/* close partition files and atomically rename (commit) them */
@@ -509,7 +471,7 @@ OpenPartitionFiles(StringInfo directoryName, uint32 fileCount)
 
 	for (fileIndex = 0; fileIndex < fileCount; fileIndex++)
 	{
-		StringInfo filePath = PartitionFilename(directoryName, fileIndex);
+		StringInfo filePath = UserPartitionFilename(directoryName, fileIndex);
 
 		fileDescriptor = PathNameOpenFilePerm(filePath->data, fileFlags, fileMode);
 		if (fileDescriptor < 0)
@@ -606,7 +568,14 @@ TaskDirectoryName(uint64 jobId, uint32 taskId)
 }
 
 
-/* Constructs a standardized partition file path for given directory and id. */
+/*
+ * PartitionFilename returns a partition file path for given directory and id
+ * which is suitable for use in worker_fetch_partition_file and tranmsit.
+ *
+ * It excludes the user ID part at the end of the filename, since that is
+ * added by worker_fetch_partition_file itself based on the current user.
+ * For the full path use UserPartitionFilename.
+ */
 StringInfo
 PartitionFilename(StringInfo directoryName, uint32 partitionId)
 {
@@ -614,6 +583,21 @@ PartitionFilename(StringInfo directoryName, uint32 partitionId)
 	appendStringInfo(partitionFilename, "%s/%s%0*u",
 					 directoryName->data,
 					 PARTITION_FILE_PREFIX, MIN_PARTITION_FILENAME_WIDTH, partitionId);
+
+	return partitionFilename;
+}
+
+
+/*
+ * UserPartitionFilename returns the path of a partition file for the given
+ * partition ID and the current user.
+ */
+static StringInfo
+UserPartitionFilename(StringInfo directoryName, uint32 partitionId)
+{
+	StringInfo partitionFilename = PartitionFilename(directoryName, partitionId);
+
+	appendStringInfo(partitionFilename, ".%u", GetUserId());
 
 	return partitionFilename;
 }
@@ -659,7 +643,12 @@ CacheDirectoryElement(const char *filename)
 	appendStringInfo(directoryPath, "base/%s/", PG_JOB_CACHE_DIR);
 
 	directoryPathFound = strstr(filename, directoryPath->data);
-	if (directoryPathFound != NULL)
+
+	/*
+	 * If directoryPath occurs at the beginning of the filename, then the
+	 * pointers should now be equal.
+	 */
+	if (directoryPathFound == filename)
 	{
 		directoryElement = true;
 	}
@@ -864,12 +853,8 @@ FileOutputStreamFlush(FileOutputStream file)
 	int written = 0;
 
 	errno = 0;
-#if (PG_VERSION_NUM >= 100000)
 	written = FileWrite(file.fileDescriptor, fileBuffer->data, fileBuffer->len,
 						PG_WAIT_IO);
-#else
-	written = FileWrite(file.fileDescriptor, fileBuffer->data, fileBuffer->len);
-#endif
 	if (written != fileBuffer->len)
 	{
 		ereport(ERROR, (errcode_for_file_access(),
@@ -1291,40 +1276,6 @@ HashPartitionId(Datum partitionValue, const void *context)
 									  partitionCount, comparisonFunction);
 	}
 
-
-	return hashPartitionId;
-}
-
-
-/*
- * HashPartitionIdViaDeprecatedAPI is required to provide backward compatibility
- * between the Citus versions 7.4 and older versions.
- *
- * HashPartitionIdViaDeprecatedAPI determines the partition number for the given data value
- * using hash partitioning. More specifically, the function returns zero if the
- * given data value is null. If not, the function applies the standard Postgres
- * hashing function for the given data type, and mods the hashed result with the
- * number of partitions. The function then returns the modded number as the
- * partition number.
- *
- * Note that any changes to PostgreSQL's hashing functions will reshuffle the
- * entire distribution created by this function. For a discussion of this issue,
- * see Google "PL/Proxy Users: Hash Functions Have Changed in PostgreSQL 8.4."
- */
-static uint32
-HashPartitionIdViaDeprecatedAPI(Datum partitionValue, const void *context)
-{
-	HashPartitionContext *hashPartitionContext = (HashPartitionContext *) context;
-	FmgrInfo *hashFunction = hashPartitionContext->hashFunction;
-	uint32 partitionCount = hashPartitionContext->partitionCount;
-	Datum hashDatum = 0;
-	uint32 hashResult = 0;
-	uint32 hashPartitionId = 0;
-
-	/* hash functions return unsigned 32-bit integers */
-	hashDatum = FunctionCall1(hashFunction, partitionValue);
-	hashResult = DatumGetUInt32(hashDatum);
-	hashPartitionId = (hashResult % partitionCount);
 
 	return hashPartitionId;
 }

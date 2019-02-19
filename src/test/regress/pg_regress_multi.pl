@@ -116,11 +116,7 @@ if (defined $libdir)
     $ENV{LD_LIBRARY_PATH} = "$libdir:".($ENV{LD_LIBRARY_PATH} || '');
     $ENV{DYLD_LIBRARY_PATH} = "$libdir:".($ENV{DYLD_LIBRARY_PATH} || '');
     $ENV{LIBPATH} = "$libdir:".($ENV{LIBPATH} || '');
-    if ($usingWindows) {
-        $ENV{PATH} = "$libdir;".($ENV{PATH} || '');
-    } else {
-        $ENV{PATH} = "$libdir:".($ENV{PATH} || '');
-    }
+    $ENV{PATH} = "$libdir:".($ENV{PATH} || '');
 }
 
 # Put $bindir to the end of PATH. We want to prefer system binaries by
@@ -128,12 +124,9 @@ if (defined $libdir)
 # want to find binaries if they're not in PATH.
 if (defined $bindir)
 {
-    if ($usingWindows) {
-        $ENV{PATH} = ($ENV{PATH} || '').";$bindir";
-    } else {
-        $ENV{PATH} = ($ENV{PATH} || '').":$bindir";
-    }
+    $ENV{PATH} = ($ENV{PATH} || '').":$bindir";
 }
+
 
 # Most people are used to unified diffs these days, rather than the
 # context diffs pg_regress defaults to.  Change default to avoid
@@ -299,6 +292,14 @@ if (-e $pg_stat_statements_control)
 {
 	$sharedPreloadLibraries .= ',pg_stat_statements'; 
 }
+
+# check if hll extension is installed
+# if it is add it to shared preload libraries
+my $hll_control = catfile($sharedir, "extension", "hll.control");
+if (-e $hll_control)
+{
+  $sharedPreloadLibraries .= ',hll';
+}
 push(@pgOptions, '-c', "shared_preload_libraries=${sharedPreloadLibraries}");
 
 push(@pgOptions, '-c', "wal_level=logical");
@@ -317,6 +318,13 @@ if ($useMitmproxy)
 {
   # make tests reproducible by never trying to negotiate ssl
   push(@pgOptions, '-c', "citus.node_conninfo=sslmode=disable");
+}
+elsif ($followercluster)
+{
+  # follower clusters don't work well when automatically generating certificates as the
+  # followers do not execute the extension creation sql scripts that trigger the creation
+  # of certificates
+  push(@pgOptions, '-c', "citus.node_conninfo=sslmode=prefer");
 }
 
 if ($useMitmproxy)
@@ -445,21 +453,23 @@ if ($usingWindows)
 {
 	print $fh "--variable=dev_null=\"/nul\" ";
 	print $fh "--variable=temp_dir=\"%TEMP%\" ";
+	print $fh "--variable=psql=\"".catfile($bindir, "psql")."\" ";
 }
 else
 {
 	print $fh "--variable=dev_null=\"/dev/null\" ";	
 	print $fh "--variable=temp_dir=\"/tmp/\" ";
+	print $fh "--variable=psql=\"psql\" ";
 }
 
 
 if ($usingWindows)
 {
-	print $fh " %*\n"; # pass on the commandline arguments
+	print $fh "%*\n"; # pass on the commandline arguments
 }
 else
 {
-	print $fh " \"\$@\"\n"; # pass on the commandline arguments
+	print $fh "\"\$@\"\n"; # pass on the commandline arguments
 }
 close $fh;
 
@@ -510,12 +520,6 @@ else
 	}
 }
 
-if ($usingWindows)
-{
-	# takeown returns a failing result code no matter what happens, so skip the check
-	system("takeown /f data");
-	system("icacls data /grant \%userdomain\%\\\%username\%:F");
-}
 
 # Routine to shutdown servers at failure/exit
 sub ShutdownServers()
@@ -626,7 +630,7 @@ END
     # At the end of a run, replace redirected binary with original again
     if ($valgrind)
     {
-	revert_replace_postgres();
+        revert_replace_postgres();
     }
 }
 
@@ -702,7 +706,7 @@ if ($followercluster)
         {
           system("tail", ("-n20", catfile("tmp_check", "follower.$port", "log", "postmaster.log")));
           die "Could not start follower server";
-	}
+        }
     }
 }
 

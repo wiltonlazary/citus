@@ -22,9 +22,6 @@
 #include "storage/s_lock.h"
 
 
-#define TotalProcs (MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts)
-
-
 /*
  * CitusInitiatedBackend keeps some information about the backends that are
  * initiated by Citus.
@@ -50,6 +47,7 @@ typedef struct CitusInitiatedBackend
 typedef struct BackendData
 {
 	Oid databaseId;
+	Oid userId;
 	slock_t mutex;
 	bool cancelledDueToDeadlock;
 	CitusInitiatedBackend citusBackend;
@@ -58,6 +56,7 @@ typedef struct BackendData
 
 
 extern void InitializeBackendManagement(void);
+extern int TotalProcCount(void);
 extern void InitializeBackendData(void);
 extern void LockBackendSharedMemory(LWLockMode lockMode);
 extern void UnlockBackendSharedMemory(void);

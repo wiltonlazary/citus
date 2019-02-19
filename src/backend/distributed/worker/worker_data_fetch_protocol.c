@@ -32,6 +32,7 @@
 #include "distributed/master_protocol.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_client_executor.h"
+#include "distributed/commands/multi_copy.h"
 #include "distributed/multi_logical_optimizer.h"
 #include "distributed/multi_partitioning_utils.h"
 #include "distributed/multi_server_executor.h"
@@ -47,10 +48,8 @@
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
-#if (PG_VERSION_NUM >= 100000)
 #include "utils/regproc.h"
 #include "utils/varlena.h"
-#endif
 
 
 /* Local functions forward declarations */
@@ -70,7 +69,6 @@ static void SetDefElemArg(AlterSeqStmt *statement, const char *name, Node *arg);
 
 /* exports for SQL callable functions */
 PG_FUNCTION_INFO_V1(worker_fetch_partition_file);
-PG_FUNCTION_INFO_V1(worker_fetch_query_results_file);
 PG_FUNCTION_INFO_V1(worker_apply_shard_ddl_command);
 PG_FUNCTION_INFO_V1(worker_apply_inter_shard_ddl_command);
 PG_FUNCTION_INFO_V1(worker_apply_sequence_command);
@@ -80,6 +78,7 @@ PG_FUNCTION_INFO_V1(worker_append_table_to_shard);
  * Following UDFs are stub functions, you can check their comments for more
  * detail.
  */
+PG_FUNCTION_INFO_V1(worker_fetch_query_results_file);
 PG_FUNCTION_INFO_V1(worker_fetch_regular_table);
 PG_FUNCTION_INFO_V1(worker_fetch_foreign_file);
 PG_FUNCTION_INFO_V1(master_expire_table_cache);
@@ -107,53 +106,7 @@ worker_fetch_partition_file(PG_FUNCTION_ARGS)
 
 	/* local filename is <jobId>/<upstreamTaskId>/<partitionTaskId> */
 	StringInfo taskDirectoryName = TaskDirectoryName(jobId, upstreamTaskId);
-	StringInfo taskFilename = TaskFilename(taskDirectoryName, partitionTaskId);
-
-	/*
-	 * If we are the first function to fetch a file for the upstream task, the
-	 * task directory does not exist. We then lock and create the directory.
-	 */
-	bool taskDirectoryExists = DirectoryExists(taskDirectoryName);
-
-	CheckCitusVersion(ERROR);
-
-	if (!taskDirectoryExists)
-	{
-		InitTaskDirectory(jobId, upstreamTaskId);
-	}
-
-	nodeName = text_to_cstring(nodeNameText);
-
-	/* we've made sure the file names are sanitized, safe to fetch as superuser */
-	FetchRegularFileAsSuperUser(nodeName, nodePort, remoteFilename, taskFilename);
-
-	PG_RETURN_VOID();
-}
-
-
-/*
- * worker_fetch_query_results_file fetches a query results file from the remote
- * node. The function assumes an upstream compute task depends on this query
- * results file, and therefore directly fetches the file into the upstream
- * task's directory.
- */
-Datum
-worker_fetch_query_results_file(PG_FUNCTION_ARGS)
-{
-	uint64 jobId = PG_GETARG_INT64(0);
-	uint32 queryTaskId = PG_GETARG_UINT32(1);
-	uint32 upstreamTaskId = PG_GETARG_UINT32(2);
-	text *nodeNameText = PG_GETARG_TEXT_P(3);
-	uint32 nodePort = PG_GETARG_UINT32(4);
-	char *nodeName = NULL;
-
-	/* remote filename is <jobId>/<queryTaskId> */
-	StringInfo remoteDirectoryName = JobDirectoryName(jobId);
-	StringInfo remoteFilename = TaskFilename(remoteDirectoryName, queryTaskId);
-
-	/* local filename is <jobId>/<upstreamTaskId>/<queryTaskId> */
-	StringInfo taskDirectoryName = TaskDirectoryName(jobId, upstreamTaskId);
-	StringInfo taskFilename = TaskFilename(taskDirectoryName, queryTaskId);
+	StringInfo taskFilename = UserTaskFilename(taskDirectoryName, partitionTaskId);
 
 	/*
 	 * If we are the first function to fetch a file for the upstream task, the
@@ -191,6 +144,21 @@ TaskFilename(StringInfo directoryName, uint32 taskId)
 
 
 /*
+ * UserTaskFilename returns a full file path for a task file including the
+ * current user ID as a suffix.
+ */
+StringInfo
+UserTaskFilename(StringInfo directoryName, uint32 taskId)
+{
+	StringInfo taskFilename = TaskFilename(directoryName, taskId);
+
+	appendStringInfo(taskFilename, ".%u", GetUserId());
+
+	return taskFilename;
+}
+
+
+/*
  * FetchRegularFileAsSuperUser copies a file from a remote node in an idempotent
  * manner. It connects to the remote node as superuser to give file access.
  * Callers must make sure that the file names are sanitized.
@@ -202,6 +170,7 @@ FetchRegularFileAsSuperUser(const char *nodeName, uint32 nodePort,
 	char *nodeUser = NULL;
 	StringInfo attemptFilename = NULL;
 	StringInfo transmitCommand = NULL;
+	char *userName = CurrentUserName();
 	uint32 randomId = (uint32) random();
 	bool received = false;
 	int renamed = 0;
@@ -216,7 +185,8 @@ FetchRegularFileAsSuperUser(const char *nodeName, uint32 nodePort,
 					 MIN_TASK_FILENAME_WIDTH, randomId, ATTEMPT_FILE_SUFFIX);
 
 	transmitCommand = makeStringInfo();
-	appendStringInfo(transmitCommand, TRANSMIT_REGULAR_COMMAND, remoteFilename->data);
+	appendStringInfo(transmitCommand, TRANSMIT_WITH_USER_COMMAND, remoteFilename->data,
+					 quote_literal_cstr(userName));
 
 	/* connect as superuser to give file access */
 	nodeUser = CitusExtensionOwnerName();
@@ -688,9 +658,7 @@ ParseTreeNode(const char *ddlCommand)
 {
 	Node *parseTreeNode = ParseTreeRawStmt(ddlCommand);
 
-#if (PG_VERSION_NUM >= 100000)
 	parseTreeNode = ((RawStmt *) parseTreeNode)->stmt;
-#endif
 
 	return parseTreeNode;
 }
@@ -766,6 +734,8 @@ worker_append_table_to_shard(PG_FUNCTION_ARGS)
 	StringInfo queryString = NULL;
 	Oid sourceShardRelationId = InvalidOid;
 	Oid sourceSchemaId = InvalidOid;
+	Oid savedUserId = InvalidOid;
+	int savedSecurityContext = 0;
 
 	CheckCitusVersion(ERROR);
 
@@ -829,8 +799,17 @@ worker_append_table_to_shard(PG_FUNCTION_ARGS)
 	appendStringInfo(queryString, COPY_IN_COMMAND, shardQualifiedName,
 					 localFilePath->data);
 
+	/* make sure we are allowed to execute the COPY command */
+	CheckCopyPermissions(localCopyCommand);
+
+	/* need superuser to copy from files */
+	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
+	SetUserIdAndSecContext(CitusExtensionOwner(), SECURITY_LOCAL_USERID_CHANGE);
+
 	CitusProcessUtility((Node *) localCopyCommand, queryString->data,
 						PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
+
+	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	/* finally delete the temporary file we created */
 	CitusDeleteFile(localFilePath->data);
@@ -891,13 +870,8 @@ AlterSequenceMinMax(Oid sequenceId, char *schemaName, char *sequenceName)
 	Form_pg_sequence sequenceData = pg_get_sequencedef(sequenceId);
 	int64 startValue = 0;
 	int64 maxValue = 0;
-#if (PG_VERSION_NUM >= 100000)
 	int64 sequenceMaxValue = sequenceData->seqmax;
 	int64 sequenceMinValue = sequenceData->seqmin;
-#else
-	int64 sequenceMaxValue = sequenceData->max_value;
-	int64 sequenceMinValue = sequenceData->min_value;
-#endif
 
 
 	/* calculate min/max values that the sequence can generate in this worker */
@@ -968,13 +942,23 @@ SetDefElemArg(AlterSeqStmt *statement, const char *name, Node *arg)
 		}
 	}
 
-#if (PG_VERSION_NUM >= 100000)
 	defElem = makeDefElem((char *) name, arg, -1);
-#else
-	defElem = makeDefElem((char *) name, arg);
-#endif
 
 	statement->options = lappend(statement->options, defElem);
+}
+
+
+/*
+ * worker_fetch_query_results_file is a stub UDF to allow the function object
+ * to be re-created during upgrades. We should keep this around until we drop
+ * support for Postgres 11, since Postgres 11 is the highest version for which
+ * this object may have been created.
+ */
+Datum
+worker_fetch_query_results_file(PG_FUNCTION_ARGS)
+{
+	ereport(DEBUG2, (errmsg("this function is deprecated and no longer is used")));
+	PG_RETURN_VOID();
 }
 
 

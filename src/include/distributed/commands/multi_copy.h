@@ -108,6 +108,9 @@ typedef struct CitusCopyDestReceiver
 
 	/* useful for tracking multi shard accesses */
 	bool multiShardCopy;
+
+	/* copy into intermediate result */
+	char *intermediateResultIdPrefix;
 } CitusCopyDestReceiver;
 
 
@@ -116,7 +119,8 @@ extern CitusCopyDestReceiver * CreateCitusCopyDestReceiver(Oid relationId,
 														   List *columnNameList,
 														   int partitionColumnIndex,
 														   EState *executorState,
-														   bool stopOnFailure);
+														   bool stopOnFailure,
+														   char *intermediateResultPrefix);
 extern FmgrInfo * ColumnOutputFunctions(TupleDesc rowDescriptor, bool binaryFormat);
 extern bool CanUseBinaryCopyFormat(TupleDesc tupleDescription);
 extern bool CanUseBinaryCopyFormatForType(Oid typeId);
@@ -129,7 +133,9 @@ extern void AppendCopyBinaryHeaders(CopyOutState headerOutputState);
 extern void AppendCopyBinaryFooters(CopyOutState footerOutputState);
 extern void EndRemoteCopy(int64 shardId, List *connectionList, bool stopOnFailure);
 extern Node * ProcessCopyStmt(CopyStmt *copyStatement, char *completionTag,
-							  bool *commandMustRunAsOwner);
+							  const char *queryString);
+extern void CheckCopyPermissions(CopyStmt *copyStatement);
+extern bool IsCopyResultStmt(CopyStmt *copyStatement);
 
 
 #endif /* MULTI_COPY_H */

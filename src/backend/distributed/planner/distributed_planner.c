@@ -84,6 +84,8 @@ static List * CopyPlanParamList(List *originalPlanParamList);
 static PlannerRestrictionContext * CreateAndPushPlannerRestrictionContext(void);
 static PlannerRestrictionContext * CurrentPlannerRestrictionContext(void);
 static void PopPlannerRestrictionContext(void);
+static void ResetPlannerRestrictionContext(
+	PlannerRestrictionContext *plannerRestrictionContext);
 static bool HasUnresolvedExternParamsWalker(Node *expression, ParamListInfo boundParams);
 
 
@@ -337,7 +339,6 @@ AdjustPartitioningForDistributedPlanning(Query *queryTree,
 		{
 			rangeTableEntry->inh = setPartitionedTablesInherited;
 
-#if (PG_VERSION_NUM >= 100000)
 			if (setPartitionedTablesInherited)
 			{
 				rangeTableEntry->relkind = RELKIND_PARTITIONED_TABLE;
@@ -346,7 +347,6 @@ AdjustPartitioningForDistributedPlanning(Query *queryTree,
 			{
 				rangeTableEntry->relkind = RELKIND_RELATION;
 			}
-#endif
 		}
 	}
 }
@@ -603,7 +603,7 @@ CreateDistributedPlan(uint64 planId, Query *originalQuery, Query *query, ParamLi
 			}
 
 			distributedPlan =
-				CreateInsertSelectPlan(originalQuery, plannerRestrictionContext);
+				CreateInsertSelectPlan(planId, originalQuery, plannerRestrictionContext);
 		}
 		else
 		{
@@ -702,12 +702,11 @@ CreateDistributedPlan(uint64 planId, Query *originalQuery, Query *query, ParamLi
 	{
 		Query *newQuery = copyObject(originalQuery);
 		bool setPartitionedTablesInherited = false;
+		PlannerRestrictionContext *currentPlannerRestrictionContext =
+			CurrentPlannerRestrictionContext();
 
-		/* remove the pre-transformation planner restrictions context */
-		PopPlannerRestrictionContext();
-
-		/* create a fresh new planner context */
-		plannerRestrictionContext = CreateAndPushPlannerRestrictionContext();
+		/* reset the current planner restrictions context */
+		ResetPlannerRestrictionContext(currentPlannerRestrictionContext);
 
 		/*
 		 * We force standard_planner to treat partitioned tables as regular tables
@@ -1533,6 +1532,24 @@ static void
 PopPlannerRestrictionContext(void)
 {
 	plannerRestrictionContextList = list_delete_first(plannerRestrictionContextList);
+}
+
+
+/*
+ * ResetPlannerRestrictionContext resets the element of the given planner
+ * restriction context.
+ */
+static void
+ResetPlannerRestrictionContext(PlannerRestrictionContext *plannerRestrictionContext)
+{
+	plannerRestrictionContext->relationRestrictionContext =
+		palloc0(sizeof(RelationRestrictionContext));
+
+	plannerRestrictionContext->joinRestrictionContext =
+		palloc0(sizeof(JoinRestrictionContext));
+
+	/* we'll apply logical AND as we add tables */
+	plannerRestrictionContext->relationRestrictionContext->allReferenceTables = true;
 }
 
 

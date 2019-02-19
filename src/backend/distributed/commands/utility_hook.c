@@ -67,45 +67,19 @@ static void PostProcessUtility(Node *parsetree);
 
 
 /*
- * multi_ProcessUtility9x is the 9.x-compatible wrapper for Citus' main utility
- * hook. It simply adapts the old-style hook to call into the new-style (10+)
- * hook, which is what now houses all actual logic.
- */
-void
-multi_ProcessUtility9x(Node *parsetree,
-					   const char *queryString,
-					   ProcessUtilityContext context,
-					   ParamListInfo params,
-					   DestReceiver *dest,
-					   char *completionTag)
-{
-	PlannedStmt *plannedStmt = makeNode(PlannedStmt);
-	plannedStmt->commandType = CMD_UTILITY;
-	plannedStmt->utilityStmt = parsetree;
-
-	multi_ProcessUtility(plannedStmt, queryString, context, params, NULL, dest,
-						 completionTag);
-}
-
-
-/*
- * CitusProcessUtility is a version-aware wrapper of ProcessUtility to account
- * for argument differences between the 9.x and 10+ PostgreSQL versions.
+ * CitusProcessUtility is a convenience method to create a PlannedStmt out of pieces of a
+ * utility statement before invoking ProcessUtility.
  */
 void
 CitusProcessUtility(Node *node, const char *queryString, ProcessUtilityContext context,
 					ParamListInfo params, DestReceiver *dest, char *completionTag)
 {
-#if (PG_VERSION_NUM >= 100000)
 	PlannedStmt *plannedStmt = makeNode(PlannedStmt);
 	plannedStmt->commandType = CMD_UTILITY;
 	plannedStmt->utilityStmt = node;
 
 	ProcessUtility(plannedStmt, queryString, context, params, NULL, dest,
 				   completionTag);
-#else
-	ProcessUtility(node, queryString, context, params, dest, completionTag);
-#endif
 }
 
 
@@ -128,9 +102,6 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 					 char *completionTag)
 {
 	Node *parsetree = pstmt->utilityStmt;
-	bool commandMustRunAsOwner = false;
-	Oid savedUserId = InvalidOid;
-	int savedSecurityContext = 0;
 	List *ddlJobs = NIL;
 	bool checkExtensionVersion = false;
 
@@ -142,13 +113,8 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 		 * that state. Since we never need to intercept transaction statements,
 		 * skip our checks and immediately fall into standard_ProcessUtility.
 		 */
-#if (PG_VERSION_NUM >= 100000)
 		standard_ProcessUtility(pstmt, queryString, context,
 								params, queryEnv, dest, completionTag);
-#else
-		standard_ProcessUtility(parsetree, queryString, context,
-								params, dest, completionTag);
-#endif
 
 		return;
 	}
@@ -166,26 +132,18 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 		 * Ensure that utility commands do not behave any differently until CREATE
 		 * EXTENSION is invoked.
 		 */
-#if (PG_VERSION_NUM >= 100000)
 		standard_ProcessUtility(pstmt, queryString, context,
 								params, queryEnv, dest, completionTag);
-#else
-		standard_ProcessUtility(parsetree, queryString, context,
-								params, dest, completionTag);
-#endif
 
 		return;
 	}
 
-#if (PG_VERSION_NUM >= 100000)
 	if (IsA(parsetree, CreateSubscriptionStmt))
 	{
 		CreateSubscriptionStmt *createSubStmt = (CreateSubscriptionStmt *) parsetree;
 
 		parsetree = ProcessCreateSubscriptionStmt(createSubStmt);
 	}
-#endif
-
 #if (PG_VERSION_NUM >= 110000)
 	if (IsA(parsetree, CallStmt))
 	{
@@ -225,17 +183,28 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 	if (IsTransmitStmt(parsetree))
 	{
 		CopyStmt *copyStatement = (CopyStmt *) parsetree;
+		char *userName = TransmitStatementUser(copyStatement);
+		bool missingOK = false;
+		StringInfo transmitPath = makeStringInfo();
 
 		VerifyTransmitStmt(copyStatement);
 
 		/* ->relation->relname is the target file in our overloaded COPY */
+		appendStringInfoString(transmitPath, copyStatement->relation->relname);
+
+		if (userName != NULL)
+		{
+			Oid userId = get_role_oid(userName, missingOK);
+			appendStringInfo(transmitPath, ".%d", userId);
+		}
+
 		if (copyStatement->is_from)
 		{
-			RedirectCopyDataToRegularFile(copyStatement->relation->relname);
+			RedirectCopyDataToRegularFile(transmitPath->data);
 		}
 		else
 		{
-			SendRegularFile(copyStatement->relation->relname);
+			SendRegularFile(transmitPath->data);
 		}
 
 		/* Don't execute the faux copy statement */
@@ -248,8 +217,7 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 		MemoryContext previousContext;
 
 		parsetree = copyObject(parsetree);
-		parsetree = ProcessCopyStmt((CopyStmt *) parsetree, completionTag,
-									&commandMustRunAsOwner);
+		parsetree = ProcessCopyStmt((CopyStmt *) parsetree, completionTag, queryString);
 
 		previousContext = MemoryContextSwitchTo(planContext);
 		parsetree = copyObject(parsetree);
@@ -450,22 +418,9 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 		}
 	}
 
-	/* set user if needed and go ahead and run local utility using standard hook */
-	if (commandMustRunAsOwner)
-	{
-		GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-		SetUserIdAndSecContext(CitusExtensionOwner(), SECURITY_LOCAL_USERID_CHANGE);
-	}
-
-#if (PG_VERSION_NUM >= 100000)
 	pstmt->utilityStmt = parsetree;
 	standard_ProcessUtility(pstmt, queryString, context,
 							params, queryEnv, dest, completionTag);
-#else
-	standard_ProcessUtility(parsetree, queryString, context,
-							params, dest, completionTag);
-#endif
-
 
 	/*
 	 * We only process CREATE TABLE ... PARTITION OF commands in the function below
@@ -493,11 +448,6 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 	if (ddlJobs != NIL)
 	{
 		PostProcessUtility(parsetree);
-	}
-
-	if (commandMustRunAsOwner)
-	{
-		SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 	}
 
 	/*
@@ -603,7 +553,7 @@ ExecuteDistributedDDLJob(DDLJob *ddlJob)
 
 		PG_TRY();
 		{
-			ExecuteModifyTasksSequentiallyWithoutResults(ddlJob->taskList, CMD_UTILITY);
+			ExecuteModifyTasksWithoutResults(ddlJob->taskList);
 
 			if (shouldSyncMetadata)
 			{

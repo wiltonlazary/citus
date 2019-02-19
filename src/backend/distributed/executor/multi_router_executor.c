@@ -95,8 +95,6 @@ static void ExecuteSingleSelectTask(CitusScanState *scanState, Task *task);
 static List * BuildPlacementAccessList(uint32 groupId, List *relationShardList,
 									   ShardPlacementAccessType accessType);
 static List * GetModifyConnections(Task *task, bool markCritical);
-static void ExecuteMultipleTasks(CitusScanState *scanState, List *taskList,
-								 bool isModificationQuery, bool expectResults);
 static int64 ExecuteModifyTasks(List *taskList, bool expectResults,
 								ParamListInfo paramListInfo, CitusScanState *scanState);
 static void AcquireExecutorShardLock(Task *task, CmdType commandType);
@@ -369,9 +367,21 @@ AcquireExecutorMultiShardLocks(List *taskList)
 			 * In either case, ShareUpdateExclusive has the desired effect, since
 			 * it conflicts with itself and ExclusiveLock (taken by non-commutative
 			 * writes).
+			 *
+			 * However, some users find this too restrictive, so we allow them to
+			 * reduce to a RowExclusiveLock when citus.enable_deadlock_prevention
+			 * is enabled, which lets multi-shard modifications run in parallel as
+			 * long as they all disable the GUC.
 			 */
 
-			lockMode = ShareUpdateExclusiveLock;
+			if (EnableDeadlockPrevention)
+			{
+				lockMode = ShareUpdateExclusiveLock;
+			}
+			else
+			{
+				lockMode = RowExclusiveLock;
+			}
 		}
 		else
 		{
@@ -1221,7 +1231,7 @@ GetModifyConnections(Task *task, bool markCritical)
  * Otherwise, the changes are committed using 2PC when the local transaction
  * commits.
  */
-static void
+void
 ExecuteMultipleTasks(CitusScanState *scanState, List *taskList,
 					 bool isModificationQuery, bool expectResults)
 {
@@ -1257,8 +1267,7 @@ ExecuteModifyTasksWithoutResults(List *taskList)
  * ExecuteModifyTasksSequentiallyWithoutResults basically calls ExecuteSingleModifyTask in
  * a loop in order to simulate sequential execution of a list of tasks. Useful
  * in cases where issuing commands in parallel before waiting for results could
- * result in deadlocks (such as CREATE INDEX CONCURRENTLY or foreign key creation to
- * reference tables).
+ * result in deadlocks (such as foreign key creation to reference tables).
  *
  * The function returns the affectedTupleCount if applicable. Otherwise, the function
  * returns 0.

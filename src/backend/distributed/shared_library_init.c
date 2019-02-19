@@ -203,11 +203,7 @@ _PG_init(void)
 	planner_hook = distributed_planner;
 
 	/* register utility hook */
-#if (PG_VERSION_NUM >= 100000)
 	ProcessUtility_hook = multi_ProcessUtility;
-#else
-	ProcessUtility_hook = multi_ProcessUtility9x;
-#endif
 
 	/* register for planner hook */
 	set_rel_pathlist_hook = multi_relation_restriction_hook;
@@ -565,15 +561,17 @@ RegisterCitusConfigVariables(void)
 
 	DefineCustomBoolVariable(
 		"citus.enable_deadlock_prevention",
-		gettext_noop("Prevents transactions from expanding to multiple nodes"),
-		gettext_noop("When enabled, consecutive DML statements that write to "
-					 "shards on different nodes are prevented to avoid creating "
-					 "undetectable distributed deadlocks when performed "
-					 "concurrently."),
+		gettext_noop("Avoids deadlocks by preventing concurrent multi-shard commands"),
+		gettext_noop("Multi-shard modifications such as UPDATE, DELETE, and "
+					 "INSERT...SELECT are typically executed in parallel. If multiple "
+					 "such commands run concurrently and affect the same rows, then "
+					 "they are likely to deadlock. When enabled, this flag prevents "
+					 "multi-shard modifications from running concurrently when they "
+					 "affect the same shards in order to prevent deadlocks."),
 		&EnableDeadlockPrevention,
 		true,
 		PGC_USERSET,
-		GUC_NO_SHOW_ALL,
+		0,
 		NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
@@ -1016,8 +1014,12 @@ RegisterCitusConfigVariables(void)
 		gettext_noop("Sets parameters used for outbound connections."),
 		NULL,
 		&NodeConninfo,
+#ifdef USE_SSL
+		"sslmode=require",
+#else
 		"sslmode=prefer",
-		PGC_POSTMASTER,
+#endif
+		PGC_SIGHUP,
 		GUC_SUPERUSER_ONLY,
 		NodeConninfoGucCheckHook,
 		NodeConninfoGucAssignHook,

@@ -132,6 +132,7 @@ master_create_distributed_table(PG_FUNCTION_ARGS)
 
 	CheckCitusVersion(ERROR);
 	EnsureCoordinator();
+	EnsureTableOwner(relationId);
 
 	/*
 	 * Lock target relation with an exclusive lock - there's no way to make
@@ -197,6 +198,8 @@ create_distributed_table(PG_FUNCTION_ARGS)
 	distributionMethodOid = PG_GETARG_OID(2);
 	colocateWithTableNameText = PG_GETARG_TEXT_P(3);
 
+	EnsureTableOwner(relationId);
+
 	/*
 	 * Lock target relation with an exclusive lock - there's no way to make
 	 * sense of this table until we've committed, and we don't want multiple
@@ -253,6 +256,7 @@ create_reference_table(PG_FUNCTION_ARGS)
 
 	EnsureCoordinator();
 	CheckCitusVersion(ERROR);
+	EnsureTableOwner(relationId);
 
 	/*
 	 * Ensure schema exists on each worker node. We can not run this function
@@ -624,7 +628,6 @@ EnsureRelationCanBeDistributed(Oid relationId, Var *distributionColumn,
 	char *relationName = NULL;
 	Oid parentRelationId = InvalidOid;
 
-	EnsureTableOwner(relationId);
 	EnsureTableNotDistributed(relationId);
 	EnsureLocalTableEmptyIfNecessary(relationId, distributionMethod, viaDeprecatedAPI);
 	EnsureReplicationSettings(InvalidOid, replicationModel);
@@ -1170,18 +1173,14 @@ CreateTruncateTrigger(Oid relationId)
 
 /*
  * RegularTable function returns true if given table's relation kind is RELKIND_RELATION
- * (or RELKIND_PARTITIONED_TABLE for PG >= 10), otherwise it returns false.
+ * or RELKIND_PARTITIONED_TABLE otherwise it returns false.
  */
 bool
 RegularTable(Oid relationId)
 {
 	char relationKind = get_rel_relkind(relationId);
 
-#if (PG_VERSION_NUM >= 100000)
 	if (relationKind == RELKIND_RELATION || relationKind == RELKIND_PARTITIONED_TABLE)
-#else
-	if (relationKind == RELKIND_RELATION)
-#endif
 	{
 		return true;
 	}
@@ -1282,7 +1281,8 @@ CopyLocalDataIntoShards(Oid distributedRelationId)
 		(DestReceiver *) CreateCitusCopyDestReceiver(distributedRelationId,
 													 columnNameList,
 													 partitionColumnIndex,
-													 estate, stopOnFailure);
+													 estate, stopOnFailure,
+													 NULL);
 
 	/* initialise state for writing to shards, we'll open connections on demand */
 	copyDest->rStartup(copyDest, 0, tupleDescriptor);
@@ -1368,12 +1368,11 @@ TupleDescColumnNameList(TupleDesc tupleDescriptor)
 
 /*
  * RelationUsesIdentityColumns returns whether a given relation uses the SQL
- * GENERATED ... AS IDENTITY features supported as of PostgreSQL 10.
+ * GENERATED ... AS IDENTITY features introduced as of PostgreSQL 10.
  */
 static bool
 RelationUsesIdentityColumns(TupleDesc relationDesc)
 {
-#if (PG_VERSION_NUM >= 100000)
 	int attributeIndex = 0;
 
 	for (attributeIndex = 0; attributeIndex < relationDesc->natts; attributeIndex++)
@@ -1385,7 +1384,6 @@ RelationUsesIdentityColumns(TupleDesc relationDesc)
 			return true;
 		}
 	}
-#endif
 
 	return false;
 }

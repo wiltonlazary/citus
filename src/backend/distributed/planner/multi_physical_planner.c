@@ -106,6 +106,8 @@ static RangeTblEntry * DerivedRangeTableEntry(MultiNode *multiNode, List *column
 											  List *tableIdList);
 static List * DerivedColumnNameList(uint32 columnCount, uint64 generatingJobId);
 static Query * BuildSubqueryJobQuery(MultiNode *multiNode);
+static void UpdateAllColumnAttributes(Node *columnContainer, List *rangeTableList,
+									  List *dependedJobList);
 static void UpdateColumnAttributes(Var *column, List *rangeTableList,
 								   List *dependedJobList);
 static Index NewTableId(Index originalTableId, List *rangeTableList);
@@ -180,7 +182,6 @@ static List * ActivePlacementList(List *placementList);
 static List * LeftRotateList(List *list, uint32 rotateCount);
 static List * FindDependedMergeTaskList(Task *sqlTask);
 static List * AssignDualHashTaskList(List *taskList);
-static int CompareTasksByTaskId(const void *leftElement, const void *rightElement);
 static void AssignDataFetchDependencies(List *taskList);
 static uint32 TaskListHighestTaskId(List *taskList);
 static List * MapTaskList(MapMergeJob *mapMergeJob, List *filterTaskList);
@@ -580,10 +581,8 @@ BuildJobQuery(MultiNode *multiNode, List *dependedJobList)
 	List *sortClauseList = NIL;
 	List *groupClauseList = NIL;
 	List *selectClauseList = NIL;
-	List *columnList = NIL;
 	Node *limitCount = NULL;
 	Node *limitOffset = NULL;
-	ListCell *columnCell = NULL;
 	FromExpr *joinTree = NULL;
 	Node *joinRoot = NULL;
 	Node *havingQual = NULL;
@@ -651,13 +650,7 @@ BuildJobQuery(MultiNode *multiNode, List *dependedJobList)
 	/* update the column attributes for target entries */
 	if (updateColumnAttributes)
 	{
-		ListCell *columnCell = NULL;
-		List *columnList = pull_var_clause_default((Node *) targetList);
-		foreach(columnCell, columnList)
-		{
-			Var *column = (Var *) lfirst(columnCell);
-			UpdateColumnAttributes(column, rangeTableList, dependedJobList);
-		}
+		UpdateAllColumnAttributes((Node *) targetList, rangeTableList, dependedJobList);
 	}
 
 	/* extract limit count/offset and sort clauses */
@@ -677,16 +670,12 @@ BuildJobQuery(MultiNode *multiNode, List *dependedJobList)
 	/* build the where clause list using select predicates */
 	selectClauseList = QuerySelectClauseList(multiNode);
 
-	/* set correct column attributes for select columns */
+	/* set correct column attributes for select and having clauses */
 	if (updateColumnAttributes)
 	{
-		columnCell = NULL;
-		columnList = pull_var_clause_default((Node *) selectClauseList);
-		foreach(columnCell, columnList)
-		{
-			Var *column = (Var *) lfirst(columnCell);
-			UpdateColumnAttributes(column, rangeTableList, dependedJobList);
-		}
+		UpdateAllColumnAttributes((Node *) selectClauseList, rangeTableList,
+								  dependedJobList);
+		UpdateAllColumnAttributes(havingQual, rangeTableList, dependedJobList);
 	}
 
 	/*
@@ -1524,6 +1513,25 @@ BuildSubqueryJobQuery(MultiNode *multiNode)
 	jobQuery->windowClause = windowClause;
 
 	return jobQuery;
+}
+
+
+/*
+ * UpdateAllColumnAttributes extracts column references from provided columnContainer
+ * and calls UpdateColumnAttributes to updates the column's range table reference (varno) and
+ * column attribute number for the range table (varattno).
+ */
+static void
+UpdateAllColumnAttributes(Node *columnContainer, List *rangeTableList,
+						  List *dependedJobList)
+{
+	ListCell *columnCell = NULL;
+	List *columnList = pull_var_clause_default(columnContainer);
+	foreach(columnCell, columnList)
+	{
+		Var *column = (Var *) lfirst(columnCell);
+		UpdateColumnAttributes(column, rangeTableList, dependedJobList);
+	}
 }
 
 
@@ -3475,7 +3483,6 @@ JoinSequenceArray(List *rangeTableFragmentsList, Query *jobQuery, List *depended
 	foreach(joinExprCell, joinExprList)
 	{
 		JoinExpr *joinExpr = (JoinExpr *) lfirst(joinExprCell);
-		JoinType joinType = joinExpr->jointype;
 		RangeTblRef *rightTableRef = (RangeTblRef *) joinExpr->rarg;
 		JoinSequenceNode *nextJoinSequenceNode = NULL;
 		uint32 nextRangeTableId = rightTableRef->rtindex;
@@ -3541,44 +3548,6 @@ JoinSequenceArray(List *rangeTableFragmentsList, Query *jobQuery, List *depended
 			if (leftColumn->vartype != rightColumn->vartype)
 			{
 				continue;
-			}
-
-			/*
-			 * Check if this is a broadcast outer join, meaning the inner table has only
-			 * 1 shard.
-			 *
-			 * Broadcast outer join is a special case. In a left join, we want to join
-			 * every fragment on the left with the one fragment on the right to ensure
-			 * that all results from the left are included. As an optimization, we could
-			 * perform these joins with any empty set instead of an actual fragment, but
-			 * in any case they must not be pruned.
-			 */
-			if (IS_OUTER_JOIN(joinType))
-			{
-				int innerRangeTableId = 0;
-				List *tableFragments = NIL;
-				int fragmentCount = 0;
-
-				if (joinType == JOIN_RIGHT)
-				{
-					innerRangeTableId = existingRangeTableId;
-				}
-				else
-				{
-					/*
-					 * Note: For a full join the logical planner ensures a 1-1 mapping,
-					 * thus it is sufficient to check one side.
-					 */
-					innerRangeTableId = nextRangeTableId;
-				}
-
-				tableFragments = FindRangeTableFragmentsList(rangeTableFragmentsList,
-															 innerRangeTableId);
-				fragmentCount = list_length(tableFragments);
-				if (fragmentCount == 1)
-				{
-					continue;
-				}
 			}
 
 			leftPartitioned = PartitionedOnColumn(leftColumn, rangeTableList,
@@ -5417,7 +5386,7 @@ AssignDualHashTaskList(List *taskList)
 
 
 /* Helper function to compare two tasks by their taskId. */
-static int
+int
 CompareTasksByTaskId(const void *leftElement, const void *rightElement)
 {
 	const Task *leftTask = *((const Task **) leftElement);

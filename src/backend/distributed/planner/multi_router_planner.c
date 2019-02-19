@@ -142,9 +142,7 @@ static bool MultiRouterPlannableQuery(Query *query,
 static DeferredErrorMessage * ErrorIfQueryHasModifyingCTE(Query *queryTree);
 static RangeTblEntry * GetUpdateOrDeleteRTE(Query *query);
 static bool SelectsFromDistributedTable(List *rangeTableList, Query *query);
-#if (PG_VERSION_NUM >= 100000)
 static List * get_all_actual_clauses(List *restrictinfo_list);
-#endif
 static int CompareInsertValuesByShardId(const void *leftElement,
 										const void *rightElement);
 static uint64 GetInitialShardId(List *relationShardList);
@@ -555,6 +553,7 @@ DeferredErrorMessage *
 ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuery,
 					 PlannerRestrictionContext *plannerRestrictionContext)
 {
+	DeferredErrorMessage *deferredError = NULL;
 	Oid distributedTableId = ExtractFirstDistributedTableId(queryTree);
 	uint32 rangeTableId = 1;
 	Var *partitionColumn = PartitionColumn(distributedTableId, rangeTableId);
@@ -562,7 +561,6 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 	ListCell *rangeTableCell = NULL;
 	uint32 queryTableCount = 0;
 	CmdType commandType = queryTree->commandType;
-	DeferredErrorMessage *deferredError = NULL;
 
 	/*
 	 * Here, we check if a recursively planned query tries to modify
@@ -1294,13 +1292,8 @@ TargetEntryChangesValue(TargetEntry *targetEntry, Var *column, FromExpr *joinTre
 		rightConst->constisnull = newValue->constisnull;
 		rightConst->constbyval = newValue->constbyval;
 
-#if (PG_VERSION_NUM >= 100000)
 		predicateIsImplied = predicate_implied_by(list_make1(equalityExpr),
 												  restrictClauseList, false);
-#else
-		predicateIsImplied = predicate_implied_by(list_make1(equalityExpr),
-												  restrictClauseList);
-#endif
 		if (predicateIsImplied)
 		{
 			/* target entry of the form SET col = <x> WHERE col = <x> AND ... */
@@ -1637,10 +1630,15 @@ RouterJob(Query *originalQuery, PlannerRestrictionContext *plannerRestrictionCon
 		 * Queries to reference tables, or distributed tables with multiple replica's have
 		 * their task placements reordered according to the configured
 		 * task_assignment_policy. This is only applicable to select queries as the modify
-		 * queries will be reordered to _always_ use the first-replica policy during
-		 * execution.
+		 * queries will _always_ be executed on all placements.
+		 *
+		 * We also ignore queries that are targeting only intermediate results (e.g., no
+		 * valid anchorShardId).
 		 */
-		ReorderTaskPlacementsByTaskAssignmentPolicy(job, TaskAssignmentPolicy);
+		if (shardId != INVALID_SHARD_ID)
+		{
+			ReorderTaskPlacementsByTaskAssignmentPolicy(job, TaskAssignmentPolicy);
+		}
 	}
 	else if (isMultiShardModifyQuery)
 	{
@@ -2518,13 +2516,10 @@ NormalizeMultiRowInsertTargetList(Query *query)
 		valuesListCell->data.ptr_value = (void *) expandedValuesList;
 	}
 
-#if (PG_VERSION_NUM >= 100000)
-
 	/* reset coltypes, coltypmods, colcollations and rebuild them below */
 	valuesRTE->coltypes = NIL;
 	valuesRTE->coltypmods = NIL;
 	valuesRTE->colcollations = NIL;
-#endif
 
 	foreach(targetEntryCell, query->targetList)
 	{
@@ -2544,11 +2539,9 @@ NormalizeMultiRowInsertTargetList(Query *query)
 		targetTypmod = exprTypmod(targetExprNode);
 		targetColl = exprCollation(targetExprNode);
 
-#if (PG_VERSION_NUM >= 100000)
 		valuesRTE->coltypes = lappend_oid(valuesRTE->coltypes, targetType);
 		valuesRTE->coltypmods = lappend_int(valuesRTE->coltypmods, targetTypmod);
 		valuesRTE->colcollations = lappend_oid(valuesRTE->colcollations, targetColl);
-#endif
 
 		if (IsA(targetExprNode, Var))
 		{
@@ -2996,8 +2989,6 @@ ErrorIfQueryHasModifyingCTE(Query *queryTree)
 }
 
 
-#if (PG_VERSION_NUM >= 100000)
-
 /*
  * get_all_actual_clauses
  *
@@ -3022,9 +3013,6 @@ get_all_actual_clauses(List *restrictinfo_list)
 	}
 	return result;
 }
-
-
-#endif
 
 
 /*

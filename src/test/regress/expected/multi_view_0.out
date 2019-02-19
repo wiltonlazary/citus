@@ -148,10 +148,12 @@ SELECT distinct(o_orderkey) FROM priority_orders join air_shipped_lineitems
 (1 row)
 
 -- left join support depends on flattening of the query
--- following query fails since the inner part is kept as subquery
-SELECT * FROM priority_orders left join air_shipped_lineitems ON (o_orderkey = l_orderkey);
-ERROR:  cannot perform distributed planning on this query
-DETAIL:  Subqueries in outer joins are not supported
+SELECT o_orderkey, l_orderkey FROM priority_orders left join air_shipped_lineitems ON (o_orderkey = l_orderkey) ORDER BY o_orderkey LIMIT 1;
+ o_orderkey | l_orderkey 
+------------+------------
+          2 |           
+(1 row)
+
 -- however, this works
 SELECT count(*) FROM priority_orders left join lineitem_hash_part ON (o_orderkey = l_orderkey) WHERE l_shipmode ='AIR';
  count 
@@ -159,11 +161,14 @@ SELECT count(*) FROM priority_orders left join lineitem_hash_part ON (o_orderkey
    700
 (1 row)
 
--- view at the inner side of is not supported
+-- view on the inner side is supported
 SELECT count(*) FROM priority_orders right join lineitem_hash_part ON (o_orderkey = l_orderkey) WHERE l_shipmode ='AIR';
-ERROR:  cannot perform distributed planning on this query
-DETAIL:  Subqueries in outer joins are not supported
--- but view at the outer side is. This is essentially the same as a left join with arguments reversed.
+ count 
+-------
+  1706
+(1 row)
+
+-- view on the outer side is supported
 SELECT count(*) FROM lineitem_hash_part right join priority_orders ON (o_orderkey = l_orderkey) WHERE l_shipmode ='AIR';
  count 
 -------
@@ -428,8 +433,8 @@ ORDER BY 2 DESC, 1;
        5 |    14
 (3 rows)
 
--- non-partition key joins are not supported inside subquery
--- since the join with a table
+-- non-partition key joins are supported inside subquery
+-- via pull-push execution
 SELECT * FROM
 	(SELECT ru.user_id, count(*) 
 		FROM recent_users ru 
@@ -438,7 +443,13 @@ SELECT * FROM
 		GROUP BY ru.user_id
 		ORDER BY 2 DESC, 1) s1
 ORDER BY 2 DESC, 1;
-ERROR:  bogus varno: 3
+ user_id | count 
+---------+-------
+       1 |    24
+       3 |    23
+       5 |     7
+(3 rows)
+
 -- join between views
 -- recent users who has an event in recent events
 SELECT ru.user_id FROM recent_users ru JOIN recent_events re USING(user_id) GROUP BY ru.user_id ORDER BY ru.user_id;
@@ -533,7 +544,8 @@ SELECT * FROM
 		ON(ru.user_id = et.event_type)
 	) s1
 ORDER BY 2 DESC, 1;
-ERROR:  bogus varno: 3
+ERROR:  cannot pushdown the subquery
+DETAIL:  Complex subqueries and CTEs cannot be in the outer part of the outer join
 -- create a select only view
 CREATE VIEW selected_users AS SELECT * FROM users_table WHERE value_1 >= 1 and value_1 <3;
 CREATE VIEW recent_selected_users AS SELECT su.* FROM selected_users su JOIN recent_users ru USING(user_id);
@@ -865,7 +877,7 @@ EXPLAIN (COSTS FALSE) SELECT et.* FROM recent_10_users JOIN events_table et USIN
    ->  Sort
          Sort Key: remote_scan."time" DESC
          ->  Custom Scan (Citus Real-Time)
-               ->  Distributed Subplan 95_1
+               ->  Distributed Subplan 96_1
                      ->  Limit
                            ->  Sort
                                  Sort Key: max((max(remote_scan.lastseen))) DESC

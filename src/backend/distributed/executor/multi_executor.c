@@ -270,21 +270,12 @@ ReadFileIntoTupleStore(char *fileName, char *copyFormat, TupleDesc tupleDescript
 	DefElem *copyOption = NULL;
 	List *copyOptions = NIL;
 
-#if (PG_VERSION_NUM >= 100000)
 	int location = -1; /* "unknown" token location */
 	copyOption = makeDefElem("format", (Node *) makeString(copyFormat), location);
-#else
-	copyOption = makeDefElem("format", (Node *) makeString(copyFormat));
-#endif
 	copyOptions = lappend(copyOptions, copyOption);
 
-#if (PG_VERSION_NUM >= 100000)
 	copyState = BeginCopyFrom(NULL, stubRelation, fileName, false, NULL,
 							  NULL, copyOptions);
-#else
-	copyState = BeginCopyFrom(stubRelation, fileName, false, NULL,
-							  copyOptions);
-#endif
 
 	while (true)
 	{
@@ -338,15 +329,21 @@ void
 ExecuteQueryStringIntoDestReceiver(const char *queryString, ParamListInfo params,
 								   DestReceiver *dest)
 {
-	Query *query = NULL;
+	Query *query = ParseQueryString(queryString);
 
-#if (PG_VERSION_NUM >= 100000)
+	ExecuteQueryIntoDestReceiver(query, params, dest);
+}
+
+
+/*
+ * ParseQuery parses query string and returns a Query struct.
+ */
+Query *
+ParseQueryString(const char *queryString)
+{
+	Query *query = NULL;
 	RawStmt *rawStmt = (RawStmt *) ParseTreeRawStmt(queryString);
 	List *queryTreeList = pg_analyze_and_rewrite(rawStmt, queryString, NULL, 0, NULL);
-#else
-	Node *queryTreeNode = ParseTreeNode(queryString);
-	List *queryTreeList = pg_analyze_and_rewrite(queryTreeNode, queryString, NULL, 0);
-#endif
 
 	if (list_length(queryTreeList) != 1)
 	{
@@ -355,7 +352,7 @@ ExecuteQueryStringIntoDestReceiver(const char *queryString, ParamListInfo params
 
 	query = (Query *) linitial(queryTreeList);
 
-	ExecuteQueryIntoDestReceiver(query, params, dest);
+	return query;
 }
 
 
@@ -404,11 +401,7 @@ ExecutePlanIntoDestReceiver(PlannedStmt *queryPlan, ParamListInfo params,
 					  NULL);
 
 	PortalStart(portal, params, eflags, GetActiveSnapshot());
-#if (PG_VERSION_NUM >= 100000)
 	PortalRun(portal, count, false, true, dest, dest, NULL);
-#else
-	PortalRun(portal, count, false, dest, dest, NULL);
-#endif
 	PortalDrop(portal, false);
 }
 
