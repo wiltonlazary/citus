@@ -164,7 +164,9 @@ _PG_init(void)
 	 * (thus as the innermost/last running hook) to be able to do our
 	 * duties. For simplicity insist that all hooks are previously unused.
 	 */
-	if (planner_hook != NULL || ProcessUtility_hook != NULL || ExecutorStart_hook != NULL)
+	if (planner_hook != NULL || ProcessUtility_hook != NULL || ExecutorStart_hook !=
+		NULL ||
+		ExecutorRun_hook != NULL)
 	{
 		ereport(ERROR, (errmsg("Citus has to be loaded first"),
 						errhint("Place citus at the beginning of "
@@ -209,6 +211,7 @@ _PG_init(void)
 	set_rel_pathlist_hook = multi_relation_restriction_hook;
 	set_join_pathlist_hook = multi_join_restriction_hook;
 	ExecutorStart_hook = CitusExecutorStart;
+	ExecutorRun_hook = CitusExecutorRun;
 
 	/* register hook for error messages */
 	emit_log_hook = multi_log_hook;
@@ -568,6 +571,21 @@ RegisterCitusConfigVariables(void)
 		PGC_USERSET,
 		GUC_NO_SHOW_ALL,
 		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		"citus.function_opens_transaction_block",
+		gettext_noop("Open transaction blocks for function calls"),
+		gettext_noop("When enabled, Citus will always send a BEGIN to workers when "
+					 "running distributed queres in a function. When disabled, the "
+					 "queries may be committed immediately after the statemnent "
+					 "completes. Disabling this flag is dangerous, it is only provided "
+					 "for backwards compatibility with pre-8.2 behaviour."),
+		&FunctionOpensTransactionBlock,
+		true,
+		PGC_USERSET,
+		GUC_NO_SHOW_ALL,
+		NULL, NULL, NULL);
+
 
 	DefineCustomBoolVariable(
 		"citus.enable_deadlock_prevention",
