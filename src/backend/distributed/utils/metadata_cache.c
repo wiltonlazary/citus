@@ -24,6 +24,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
 #include "citus_version.h"
+#include "commands/dbcommands.h"
 #include "commands/extension.h"
 #include "commands/trigger.h"
 #include "distributed/colocation_utils.h"
@@ -137,6 +138,8 @@ typedef struct MetadataCacheData
 	Oid unavailableNodeRoleId;
 	Oid pgTableIsVisibleFuncId;
 	Oid citusTableIsVisibleFuncId;
+	bool databaseNameValid;
+	char databaseName[NAMEDATALEN];
 } MetadataCacheData;
 
 
@@ -526,6 +529,7 @@ ResolveGroupShardPlacement(GroupShardPlacement *groupShardPlacement,
 
 	shardPlacement->nodeName = pstrdup(workerNode->workerName);
 	shardPlacement->nodePort = workerNode->workerPort;
+	shardPlacement->nodeId = workerNode->nodeId;
 
 	/* fill in remaining fields */
 	Assert(tableEntry->partitionMethod != 0);
@@ -2102,6 +2106,33 @@ CitusTableVisibleFuncId(void)
 
 
 /*
+ * CurrentDatabaseName gets the name of the current database and caches
+ * the result.
+ *
+ * Given that the database name cannot be changed when there is at least
+ * one session connected to it, we do not need to implement any invalidation
+ * mechanism.
+ */
+char *
+CurrentDatabaseName(void)
+{
+	if (!MetadataCache.databaseNameValid)
+	{
+		char *databaseName = get_database_name(MyDatabaseId);
+		if (databaseName == NULL)
+		{
+			return NULL;
+		}
+
+		strlcpy(MetadataCache.databaseName, databaseName, NAMEDATALEN);
+		MetadataCache.databaseNameValid = true;
+	}
+
+	return MetadataCache.databaseName;
+}
+
+
+/*
  * CitusExtensionOwner() returns the owner of the 'citus' extension. That user
  * is, amongst others, used to perform actions a normal user might not be
  * allowed to perform.
@@ -3147,15 +3178,7 @@ CreateDistTableCache(void)
 void
 InvalidateMetadataSystemCache(void)
 {
-	ConnParamsHashEntry *entry = NULL;
-	HASH_SEQ_STATUS status;
-
-	hash_seq_init(&status, ConnParamsHash);
-
-	while ((entry = (ConnParamsHashEntry *) hash_seq_search(&status)) != NULL)
-	{
-		entry->isValid = false;
-	}
+	InvalidateConnParamsHashEntries();
 
 	memset(&MetadataCache, 0, sizeof(MetadataCache));
 	workerNodeHashValid = false;
