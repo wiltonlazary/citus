@@ -5,7 +5,6 @@ CREATE SCHEMA subquery_deep;
 SET search_path TO subquery_and_ctes, public;
 
 SET client_min_messages TO DEBUG1;
-
 -- subquery in FROM -> FROM -> FROM should be replaced due to OFFSET
 -- one level up subquery should be replaced due to GROUP BY on non partition key
 -- one level up subquery should be replaced due to LIMUT
@@ -14,19 +13,25 @@ SELECT
 FROM 
 	(
 		SELECT users_table.user_id FROM users_table, 
-							(
-								SELECT 
-									avg(event_type) as avg_val
-								FROM
-									(SELECT event_type, users_table.user_id FROM users_table, 
-															(SELECT user_id, event_type FROM events_table WHERE value_2 < 3 OFFSET 3) as foo
-															WHERE foo.user_id = users_table.user_id
-															) bar, users_table WHERE bar.user_id = users_table.user_id GROUP BY users_table.value_1
-
-							) as baz
-									WHERE baz.avg_val < users_table.user_id
-								    LIMIT 3
-
+		(
+			SELECT 
+				avg(event_type) as avg_val
+			FROM
+				(SELECT 	
+					event_type, users_table.user_id 
+				 FROM 
+				 	users_table, (SELECT user_id, event_type FROM events_table WHERE value_2 < 3 ORDER BY 1, 2 OFFSET 3) as foo
+				 WHERE 
+				 	foo.user_id = users_table.user_id) bar, users_table 
+			WHERE 
+				bar.user_id = users_table.user_id 
+		GROUP BY 
+			users_table.value_1
+		) as baz
+		WHERE 
+			baz.avg_val < users_table.user_id
+		ORDER BY 1
+		LIMIT 3
 	) as sub1
 	ORDER BY 1 DESC;
 

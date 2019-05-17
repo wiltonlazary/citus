@@ -306,10 +306,10 @@ UPDATE tt2 SET col_2 = 5 RETURNING id, col_2;
  id | col_2 
 ----+-------
   1 |     5
+  2 |     5
   3 |     5
   7 |     5
   9 |     5
-  2 |     5
 (5 rows)
 
 SET citus.multi_shard_modify_mode to sequential;
@@ -317,10 +317,10 @@ UPDATE tt2 SET col_2 = 3 RETURNING id, col_2;
  id | col_2 
 ----+-------
   1 |     3
+  2 |     3
   3 |     3
   7 |     3
   9 |     3
-  2 |     3
 (5 rows)
 
 DROP TABLE tt2;
@@ -773,16 +773,16 @@ SELECT * FROM test_table_1 ORDER BY 1 DESC, 2 DESC, 3 DESC;
 (3 rows)
 
 UPDATE test_table_1 SET col_3 = 3 WHERE date_col < now();
-SELECT * FROM test_table_1;
+SELECT * FROM test_table_1 ORDER BY 1 DESC, 2 DESC, 3 DESC;
  id |           date_col           | col_3 
 ----+------------------------------+-------
-  1 | Sat Apr 05 08:32:12 2014 PDT |     3
   3 | Mon Jan 12 08:35:19 2111 PST |     9
   2 | Sun Feb 01 08:31:16 2015 PST |     3
+  1 | Sat Apr 05 08:32:12 2014 PDT |     3
 (3 rows)
 
 DELETE FROM test_table_1 WHERE date_col < current_timestamp;
-SELECT * FROM test_table_1;
+SELECT * FROM test_table_1 ORDER BY 1 DESC, 2 DESC, 3 DESC;
  id |           date_col           | col_3 
 ----+------------------------------+-------
   3 | Mon Jan 12 08:35:19 2111 PST |     9
